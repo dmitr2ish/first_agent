@@ -59,7 +59,9 @@ Enter your query:
 
 The agent will output its thought process (calling tools) and finally generate a detailed Markdown report.
 
-Type `exit` to quit the program.
+- Type `/exit` to quit the program.
+- Type `/change_model` to choose another ollama model.
+- Type `/current_model` to show current ollama model.
 
 ### 📁 Project Structure
 

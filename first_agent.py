@@ -8,8 +8,6 @@ from openai import OpenAI
 
 model_url = 'http://localhost:11434/v1'
 api_key = 'ollama'
-model = 'hermes3:8b-llama3.1-q4_K_M'
-
 
 # TOOLS
 
@@ -18,7 +16,7 @@ def web_search(query: str) -> str:
     print(f"\n[TOOL] Searching in internet: '{query}'...")
     try:
         with DDGS() as duckduckgo:
-            results = list(duckduckgo.text(query, max_results=3))
+            results = list(duckduckgo.text(query, max_results=2))
         return json.dumps(results, ensure_ascii=False)
     except Exception as e:
         return f"Search error: {e}"
@@ -35,7 +33,7 @@ def extract_url_text(url: str) -> str:
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text(separator=' ', strip=True)
 
-        return text[:4000]
+        return text
     except Exception as e:
         return f"Exception reading page: {e}"
 
@@ -79,6 +77,36 @@ tools_schema = [
 # CLIENT
 client = OpenAI(base_url=model_url, api_key=api_key)
 
+def choose_model() -> str:
+    """Retrieve list of available ollama models and asking to choose one"""
+    print("\n[^-^] Retrieving list of available ollama models...")
+    try:
+        models_response = client.models.list()
+        available_models = [model.id for model in models_response.data]
+        if not available_models:
+            print("No models available. Run 'ollama pull <model_name>' in terminal")
+            exit()
+        print("\n====Available models====")
+        for i, model in enumerate(available_models):
+            print(f"{i+1}.{model}")
+        print("="*10)
+
+        while True:
+            choice = input("\nChoose one of the available models: ")
+            try:
+                choice_index = int(choice) - 1
+                if 0 <= choice_index < len(available_models):
+                    selected_model = available_models[choice_index]
+                    print(f"Chosen model: {selected_model}")
+                    return selected_model
+                else:
+                    print("Invalid choice. Try again.")
+            except ValueError:
+                print("Invalid choice. Try again.")
+    except Exception as e:
+        print(f"Exception choosing model: {e}")
+        exit()
+
 # AGENTIC LOOP
 
 system_prompt = {"role": "system",
@@ -98,12 +126,9 @@ CRITICAL RULES:
 """}
 
 
-def run_agent(user_query: str):
+def run_agent(user_query: str, model: str):
     # AGENT MEMORY
-    messages = [system_prompt]
-
-    print(f"0_0 User: {user_query}\n")
-    messages.append({"role": "user", "content": user_query})
+    messages = [system_prompt, {"role": "user", "content": user_query}]
 
     # LOOP (Orchestrator)
     while True:
@@ -180,18 +205,29 @@ def run_agent(user_query: str):
 # RUNNING HERE (psvm)
 
 if __name__ == "__main__":
+    selected_model = choose_model()
     print("Hello, i m a Research agent\nWrite \'exit\' to exit.")
     while True:
         print("\n" + "=" * 40)
         print("Enter your query:")
         user_query = input("> ")
 
-        if user_query.strip().lower() == "exit":
+        if user_query.strip().lower() == "/exit":
             print("\n" + "=" * 40)
             print("Thank you for using Research agent")
             break
+        if user_query.strip().lower() == "/change_model":
+            print("\n" + "=" * 40)
+            print("Requested new model")
+            selected_model = choose_model()
+            continue
+        if user_query.strip().lower() == "/current_model":
+            print("\n" + "=" * 40)
+            print(f"Current is model {selected_model}")
+            continue
+
 
         if not user_query.strip():  # empty enter
             continue
 
-        run_agent(user_query)
+        run_agent(user_query, selected_model)

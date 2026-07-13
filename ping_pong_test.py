@@ -1,7 +1,7 @@
 from openai import OpenAI
 
 api_url = 'http://localhost:11434/v1'
-testing_model = 'hermes3:8b-llama3.1-q4_K_M'
+testing_model = 'qwen2.5:14b'
 prompt_message = "Hi, i m checking that you are working, tell me something funny and short"
 
 client = OpenAI(base_url=api_url, api_key='ollama')

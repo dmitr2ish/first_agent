@@ -208,26 +208,29 @@ if __name__ == "__main__":
     selected_model = choose_model()
     print("Hello, i m a Research agent\nWrite \'exit\' to exit.")
     while True:
-        print("\n" + "=" * 40)
-        print("Enter your query:")
-        user_query = input("> ")
-
-        if user_query.strip().lower() == "/exit":
+        try:
             print("\n" + "=" * 40)
-            print("Thank you for using Research agent")
-            break
-        if user_query.strip().lower() == "/change_model":
-            print("\n" + "=" * 40)
-            print("Requested new model")
-            selected_model = choose_model()
-            continue
-        if user_query.strip().lower() == "/current_model":
-            print("\n" + "=" * 40)
-            print(f"Current is model {selected_model}")
-            continue
+            print("Enter your query:")
+            user_query = input("> ")
+
+            if user_query.strip().lower() == "/exit":
+                print("\n" + "=" * 40)
+                print("Thank you for using Research agent")
+                break
+            if user_query.strip().lower() == "/change_model":
+                print("\n" + "=" * 40)
+                print("Requested new model")
+                selected_model = choose_model()
+                continue
+            if user_query.strip().lower() == "/current_model":
+                print("\n" + "=" * 40)
+                print(f"Current is model {selected_model}")
+                continue
 
 
-        if not user_query.strip():  # empty enter
-            continue
+            if not user_query.strip():  # empty enter
+                continue
 
-        run_agent(user_query, selected_model)
+            run_agent(user_query, selected_model)
+        except Exception as e:
+            print(e)

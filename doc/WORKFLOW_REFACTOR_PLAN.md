@@ -118,8 +118,8 @@ stdout зафиксированы аргументы, результат и вр
 
 Подробности сохранены в документации:
 
-- [`doc/phase_1_report.md`](doc/phase_1_report.md) — отчёт о выполнении;
-- [`doc/phase_1_implementation.md`](doc/phase_1_implementation.md) — описание
+- [`doc/phase_1_report.md`](phase_1_report.md) — отчёт о выполнении;
+- [`doc/phase_1_implementation.md`](phase_1_implementation.md) — описание
   реализации и самостоятельной проверки.
 
 ## Этап 2. Программный контроль tool calls

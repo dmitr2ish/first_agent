@@ -11,4 +11,4 @@
   трассировки и способов самостоятельной проверки.
 
 Общий план дальнейшего рефакторинга находится в
-[`WORKFLOW_REFACTOR_PLAN.md`](../WORKFLOW_REFACTOR_PLAN.md).
+[`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

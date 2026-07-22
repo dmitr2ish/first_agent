@@ -1,5 +1,4 @@
 import json
-import os
 import requests
 
 from ddgs import DDGS

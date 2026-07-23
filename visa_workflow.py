@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -149,6 +150,246 @@ def run_researcher_with_sources(
             "source_package": source_package,
         },
     )
+
+
+EVIDENCE_TOOLS = {
+    "search_official_sources",
+    "read_official_source",
+}
+
+
+@dataclass(frozen=True)
+class ToolCallRecord:
+    """Normalized data for one tool execution returned by Agno."""
+
+    name: str
+    arguments: dict[str, Any]
+    success: bool
+    error: bool
+    duration_seconds: float | None
+    evidence_read: bool
+
+
+@dataclass(frozen=True)
+class ToolCallSummary:
+    """Programmatic summary of actual tool executions."""
+
+    calls: tuple[ToolCallRecord, ...]
+    total_count: int
+    tool_names: tuple[str, ...]
+    successful_count: int
+    error_count: int
+    evidence_read_performed: bool
+    total_duration_seconds: float | None
+
+
+@dataclass(frozen=True)
+class ResearcherRunResult:
+    """Result of Researcher execution with evidence enforcement."""
+
+    response: Any
+    tool_summary: ToolCallSummary
+    attempt_count: int
+
+
+def _tool_value(tool: Any, name: str, default: Any = None) -> Any:
+    if isinstance(tool, dict):
+        return tool.get(name, default)
+
+    return getattr(tool, name, default)
+
+
+def _parse_tool_result(result: Any) -> Any:
+    if not isinstance(result, str):
+        return result
+
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError:
+        return result
+
+
+def _tool_result_has_error(result: Any) -> bool:
+    parsed_result = _parse_tool_result(result)
+    return isinstance(parsed_result, dict) and bool(parsed_result.get("error"))
+
+
+def _tool_read_evidence(name: str, success: bool, result: Any) -> bool:
+    if not success or name not in EVIDENCE_TOOLS:
+        return False
+
+    parsed_result = _parse_tool_result(result)
+
+    if not isinstance(parsed_result, dict):
+        return False
+
+    if name == "search_official_sources":
+        matches = parsed_result.get("matches")
+        return isinstance(matches, list) and bool(matches)
+
+    content = parsed_result.get("content")
+    return isinstance(content, str) and bool(content.strip())
+
+
+def summarize_tool_calls(response: Any) -> ToolCallSummary:
+    """Extract deterministic tool-call metrics from an Agno response."""
+
+    tools = getattr(response, "tools", None) or []
+    records: list[ToolCallRecord] = []
+
+    for tool in tools:
+        name = str(_tool_value(tool, "tool_name", "") or "")
+        arguments = _tool_value(tool, "tool_args", {})
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        result = _tool_value(tool, "result")
+        execution_error = _tool_value(tool, "tool_call_error") is True
+        semantic_error = _tool_result_has_error(result)
+        error = execution_error or semantic_error
+        success = not error
+
+        metrics = _tool_value(tool, "metrics")
+        duration = _tool_value(metrics, "duration")
+
+        if not isinstance(duration, (int, float)):
+            duration = None
+        else:
+            duration = float(duration)
+
+        records.append(
+            ToolCallRecord(
+                name=name,
+                arguments=arguments,
+                success=success,
+                error=error,
+                duration_seconds=duration,
+                evidence_read=_tool_read_evidence(
+                    name,
+                    success,
+                    result,
+                ),
+            )
+        )
+
+    return _summarize_records(records)
+
+
+def _summarize_records(
+        records: list[ToolCallRecord],
+) -> ToolCallSummary:
+    durations = [
+        record.duration_seconds
+        for record in records
+        if record.duration_seconds is not None
+    ]
+
+    return ToolCallSummary(
+        calls=tuple(records),
+        total_count=len(records),
+        tool_names=tuple(record.name for record in records),
+        successful_count=sum(record.success for record in records),
+        error_count=sum(record.error for record in records),
+        evidence_read_performed=any(
+            record.evidence_read for record in records
+        ),
+        total_duration_seconds=(sum(durations) if durations else None),
+    )
+
+
+def combine_tool_call_summaries(
+        *summaries: ToolCallSummary,
+) -> ToolCallSummary:
+    """Combine calls from multiple controlled Researcher attempts."""
+
+    return _summarize_records(
+        [
+            call
+            for summary in summaries
+            for call in summary.calls
+        ]
+    )
+
+
+def run_researcher_with_evidence_control(
+        researcher: Agent,
+        prompt: str,
+        source_package: dict[str, Any],
+) -> ResearcherRunResult:
+    """Run Researcher and retry once if no evidence was actually read."""
+
+    first_response = run_researcher_with_sources(
+        researcher,
+        prompt,
+        source_package,
+    )
+    first_summary = summarize_tool_calls(first_response)
+
+    if first_summary.evidence_read_performed:
+        return ResearcherRunResult(
+            response=first_response,
+            tool_summary=first_summary,
+            attempt_count=1,
+        )
+
+    retry_prompt = f"""
+{prompt}
+
+MANDATORY RETRY:
+Your previous response did not successfully read evidence. You must call
+search_official_sources or read_official_source and receive relevant source
+content before writing the report. Calling only list_official_sources is not
+sufficient.
+""".strip()
+
+    second_response = run_researcher_with_sources(
+        researcher,
+        retry_prompt,
+        source_package,
+    )
+    second_summary = summarize_tool_calls(second_response)
+
+    return ResearcherRunResult(
+        response=second_response,
+        tool_summary=combine_tool_call_summaries(
+            first_summary,
+            second_summary,
+        ),
+        attempt_count=2,
+    )
+
+
+def build_researcher_step_output(
+        result: ResearcherRunResult,
+) -> StepOutput:
+    """Convert the controlled run into a deterministic Workflow result."""
+
+    if not result.tool_summary.evidence_read_performed:
+        return StepOutput(
+            step_name="analyze_official_sources",
+            content=(
+                "Researcher did not read evidence after "
+                f"{result.attempt_count} attempts."
+            ),
+            success=False,
+        )
+
+    report = get_response_content(result.response)
+
+    if not report:
+        return StepOutput(
+            step_name="analyze_official_sources",
+            content="Researcher returned an empty report.",
+            success=False,
+        )
+
+    return StepOutput(
+        step_name="analyze_official_sources",
+        content=report,
+        success=True,
+    )
+
 
 def get_git_commit() -> str:
     try:
@@ -570,26 +811,13 @@ Required structure:
 Every factual statement must cite [S1], [S2], etc.
 """.strip()
 
-        response = run_researcher_with_sources(
+        researcher_result = run_researcher_with_evidence_control(
             researcher,
             prompt,
             source_package,
         )
 
-        report = get_response_content(response)
-
-        if not report:
-            return StepOutput(
-                step_name="analyze_official_sources",
-                content="Researcher returned an empty report.",
-                success=False,
-            )
-
-        return StepOutput(
-            step_name="analyze_official_sources",
-            content=report,
-            success=True,
-        )
+        return build_researcher_step_output(researcher_result)
 
     # ========================================================
     # ШАГ 4: ПРОВЕРКА ОТЧЁТА

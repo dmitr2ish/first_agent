@@ -192,6 +192,14 @@ class ResearcherRunResult:
     attempt_count: int
 
 
+class EvidenceReadRequiredError(RuntimeError):
+    """Raised when Researcher fails to read evidence after its retry."""
+
+
+class ResearcherReportEmptyError(RuntimeError):
+    """Raised when Researcher reads evidence but returns no report."""
+
+
 def _tool_value(tool: Any, name: str, default: Any = None) -> Any:
     if isinstance(tool, dict):
         return tool.get(name, default)
@@ -366,22 +374,16 @@ def build_researcher_step_output(
     """Convert the controlled run into a deterministic Workflow result."""
 
     if not result.tool_summary.evidence_read_performed:
-        return StepOutput(
-            step_name="analyze_official_sources",
-            content=(
-                "Researcher did not read evidence after "
-                f"{result.attempt_count} attempts."
-            ),
-            success=False,
+        raise EvidenceReadRequiredError(
+            "Researcher did not read evidence after "
+            f"{result.attempt_count} attempts."
         )
 
     report = get_response_content(result.response)
 
     if not report:
-        return StepOutput(
-            step_name="analyze_official_sources",
-            content="Researcher returned an empty report.",
-            success=False,
+        raise ResearcherReportEmptyError(
+            "Researcher returned an empty report."
         )
 
     return StepOutput(
@@ -1019,7 +1021,10 @@ Important:
         ),
         executor=analyze_sources,
         add_workflow_history=False,
-        max_retries=1,
+        # Evidence control already performs exactly one model retry.
+        # A Step-level retry would repeat the entire two-attempt sequence.
+        max_retries=0,
+        on_error="fail",
         hitl_timeout=120,
     )
 

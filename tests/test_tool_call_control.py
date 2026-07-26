@@ -2,7 +2,12 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from agno.workflow.step import Step, StepInput, StepOutput
+from agno.workflow.workflow import Workflow
+
 from visa_workflow import (
+    EvidenceReadRequiredError,
+    ResearcherReportEmptyError,
     build_researcher_step_output,
     run_researcher_with_evidence_control,
     summarize_tool_calls,
@@ -217,9 +222,11 @@ class ResearcherEvidenceControlTests(unittest.TestCase):
         self.assertFalse(result.tool_summary.evidence_read_performed)
         self.assertEqual(len(researcher.calls), 2)
 
-        step_output = build_researcher_step_output(result)
-        self.assertFalse(step_output.success)
-        self.assertIn("did not read evidence", step_output.content)
+        with self.assertRaisesRegex(
+                EvidenceReadRequiredError,
+                "did not read evidence",
+        ):
+            build_researcher_step_output(result)
 
     def test_successful_read_allows_workflow_step_to_continue(self) -> None:
         researcher = SequenceResearcher(
@@ -241,6 +248,124 @@ class ResearcherEvidenceControlTests(unittest.TestCase):
 
         self.assertTrue(step_output.success)
         self.assertEqual(step_output.content, "verified report [S1]")
+
+    def test_empty_report_after_evidence_is_failure(self) -> None:
+        researcher = SequenceResearcher(
+            response(
+                "",
+                tool(
+                    "read_official_source",
+                    {"source_id": "S1", "content": "fact"},
+                ),
+            )
+        )
+
+        result = run_researcher_with_evidence_control(
+            researcher,
+            "Research prompt",
+            self.source_package,
+        )
+
+        with self.assertRaisesRegex(
+                ResearcherReportEmptyError,
+                "empty report",
+        ):
+            build_researcher_step_output(result)
+
+    def test_missing_evidence_stops_real_workflow(self) -> None:
+        researcher = SequenceResearcher(
+            response("unsupported claim"),
+            response(
+                "still unsupported",
+                tool("list_official_sources", [{"source_id": "S1"}]),
+            ),
+        )
+        downstream_executed = False
+
+        def research_executor(_: StepInput) -> StepOutput:
+            result = run_researcher_with_evidence_control(
+                researcher,
+                "Research prompt",
+                self.source_package,
+            )
+            return build_researcher_step_output(result)
+
+        def downstream_executor(_: StepInput) -> StepOutput:
+            nonlocal downstream_executed
+            downstream_executed = True
+            return StepOutput(content="must not execute")
+
+        workflow = Workflow(
+            id="missing-evidence-test-workflow",
+            steps=[
+                Step(
+                    name="research",
+                    executor=research_executor,
+                    max_retries=0,
+                    on_error="fail",
+                ),
+                Step(
+                    name="downstream",
+                    executor=downstream_executor,
+                ),
+            ],
+        )
+
+        with self.assertRaisesRegex(
+                EvidenceReadRequiredError,
+                "did not read evidence",
+        ):
+            workflow.run(input="test", stream=False)
+
+        self.assertFalse(downstream_executed)
+        self.assertEqual(len(researcher.calls), 2)
+
+    def test_successful_evidence_allows_real_workflow_to_continue(self) -> None:
+        researcher = SequenceResearcher(
+            response(
+                "verified report [S1]",
+                tool(
+                    "read_official_source",
+                    {"source_id": "S1", "content": "fact"},
+                ),
+            )
+        )
+        downstream_executed = False
+
+        def research_executor(_: StepInput) -> StepOutput:
+            result = run_researcher_with_evidence_control(
+                researcher,
+                "Research prompt",
+                self.source_package,
+            )
+            return build_researcher_step_output(result)
+
+        def downstream_executor(_: StepInput) -> StepOutput:
+            nonlocal downstream_executed
+            downstream_executed = True
+            return StepOutput(content="continued", success=True)
+
+        workflow = Workflow(
+            id="successful-evidence-test-workflow",
+            steps=[
+                Step(
+                    name="research",
+                    executor=research_executor,
+                    max_retries=0,
+                    on_error="fail",
+                ),
+                Step(
+                    name="downstream",
+                    executor=downstream_executor,
+                ),
+            ],
+        )
+
+        workflow_output = workflow.run(input="test", stream=False)
+
+        self.assertTrue(downstream_executed)
+        self.assertEqual(str(workflow_output.status), "RunStatus.completed")
+        self.assertEqual(workflow_output.content, "continued")
 
 
 if __name__ == "__main__":

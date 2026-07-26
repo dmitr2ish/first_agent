@@ -16,5 +16,11 @@
   tool calls, правило evidence read, контролируемый retry, тесты и
   интеграционная проверка.
 
+## Этап 3. Программная проверка citations
+
+- [Отчёт о выполнении этапа 3](phase_3_report.md) — детерминированное
+  извлечение citations, обнаружение недопустимых source IDs, отдельный шаг
+  Workflow и передача результата Validator.
+
 Общий план дальнейшего рефакторинга находится в
 [`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

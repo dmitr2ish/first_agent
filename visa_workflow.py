@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -192,12 +192,143 @@ class ResearcherRunResult:
     attempt_count: int
 
 
+@dataclass(frozen=True)
+class CitationCheckResult:
+    """Deterministic validation of source IDs cited in a report."""
+
+    citation_count: int
+    used_source_ids: tuple[str, ...]
+    invalid_source_ids: tuple[str, ...]
+    allowed_source_ids: tuple[str, ...]
+    has_citations: bool
+
+
 class EvidenceReadRequiredError(RuntimeError):
     """Raised when Researcher fails to read evidence after its retry."""
 
 
 class ResearcherReportEmptyError(RuntimeError):
     """Raised when Researcher reads evidence but returns no report."""
+
+
+def _source_id_sort_key(source_id: str) -> tuple[int, str]:
+    match = re.fullmatch(r"S(\d+)", source_id)
+
+    if match:
+        return int(match.group(1)), source_id
+
+    return 2 ** 31, source_id
+
+
+def check_report_citations(
+        report: str,
+        source_package: dict[str, Any],
+) -> CitationCheckResult:
+    """Check exact [S<number>] citations against the source package."""
+
+    citations = re.findall(r"\[(S\d+)\]", report)
+    used_source_ids = set(citations)
+    allowed_source_ids = {
+        str(source.get("source_id", "")).strip().upper()
+        for source in source_package.get("sources", [])
+        if str(source.get("source_id", "")).strip()
+    }
+    invalid_source_ids = used_source_ids - allowed_source_ids
+
+    return CitationCheckResult(
+        citation_count=len(citations),
+        used_source_ids=tuple(sorted(
+            used_source_ids,
+            key=_source_id_sort_key,
+        )),
+        invalid_source_ids=tuple(sorted(
+            invalid_source_ids,
+            key=_source_id_sort_key,
+        )),
+        allowed_source_ids=tuple(sorted(
+            allowed_source_ids,
+            key=_source_id_sort_key,
+        )),
+        has_citations=bool(citations),
+    )
+
+
+def citation_check_to_json(result: CitationCheckResult) -> str:
+    """Serialize citation metrics for Workflow step output and benchmark."""
+
+    return json.dumps(
+        asdict(result),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def build_citation_step_output(
+        report: str,
+        source_package: dict[str, Any],
+) -> StepOutput:
+    """Create the persisted Workflow output for citation metrics."""
+
+    return StepOutput(
+        step_name="check_research_citations",
+        content=citation_check_to_json(
+            check_report_citations(
+                report,
+                source_package,
+            )
+        ),
+        success=True,
+    )
+
+
+def build_validator_prompt(
+        source_package_json: str,
+        research_report: str,
+        citation_check_json: str,
+) -> str:
+    """Build the Validator prompt with deterministic citation findings."""
+
+    return f"""
+SOURCE PACKAGE:
+{source_package_json}
+
+PROGRAMMATIC CITATION CHECK:
+{citation_check_json}
+
+RESEARCH REPORT TO VALIDATE:
+{research_report}
+
+Validate the report line by line.
+
+The programmatic citation check is authoritative for source ID syntax and
+existence:
+- If has_citations is false, remove unsupported factual claims and explicitly
+  state that the report did not provide verifiable citations.
+- Remove every citation listed in invalid_source_ids together with claims that
+  are not otherwise supported by an allowed source.
+- Do not invent replacement source IDs.
+
+Return a corrected report that contains only claims supported
+by the provided sources.
+""".strip()
+
+
+def run_validator_with_citation_check(
+        validator: Agent,
+        source_package_json: str,
+        research_report: str,
+        citation_check_json: str,
+) -> Any:
+    """Run Validator with the deterministic citation result in its prompt."""
+
+    return validator.run(
+        build_validator_prompt(
+            source_package_json,
+            research_report,
+            citation_check_json,
+        ),
+        stream=False,
+    )
 
 
 def _tool_value(tool: Any, name: str, default: Any = None) -> Any:
@@ -822,7 +953,51 @@ Every factual statement must cite [S1], [S2], etc.
         return build_researcher_step_output(researcher_result)
 
     # ========================================================
-    # ШАГ 4: ПРОВЕРКА ОТЧЁТА
+    # ШАГ 4: ПРОГРАММНАЯ ПРОВЕРКА CITATIONS
+    # ========================================================
+
+    def check_citations(
+            step_input: StepInput,
+    ) -> StepOutput:
+        source_package_json = (
+                step_input.get_step_content(
+                    "collect_official_sources",
+                )
+                or ""
+        )
+        research_report = (
+                step_input.get_step_content(
+                    "analyze_official_sources",
+                )
+                or ""
+        )
+
+        if not source_package_json or not research_report:
+            raise ValueError(
+                "Source package or research report is missing "
+                "for citation check."
+            )
+
+        try:
+            source_package = json.loads(source_package_json)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                "Source package is not valid JSON for citation check."
+            ) from error
+
+        if not isinstance(source_package, dict):
+            raise ValueError(
+                "Source package must be a JSON object "
+                "for citation check."
+            )
+
+        return build_citation_step_output(
+            research_report,
+            source_package,
+        )
+
+    # ========================================================
+    # ШАГ 5: ПРОВЕРКА ОТЧЁТА
     # ========================================================
 
     def validate_research(
@@ -841,32 +1016,32 @@ Every factual statement must cite [S1], [S2], etc.
                 )
                 or ""
         )
+        citation_check_json = (
+                step_input.get_step_content(
+                    "check_research_citations",
+                )
+                or ""
+        )
 
-        if not source_package or not research_report:
+        if (
+                not source_package
+                or not research_report
+                or not citation_check_json
+        ):
             return StepOutput(
                 step_name="validate_research",
                 content=(
-                    "Source package or research report is missing."
+                    "Source package, research report, or citation "
+                    "check is missing."
                 ),
                 success=False,
             )
 
-        prompt = f"""
-SOURCE PACKAGE:
-{source_package}
-
-RESEARCH REPORT TO VALIDATE:
-{research_report}
-
-Validate the report line by line.
-
-Return a corrected report that contains only claims supported
-by the provided sources.
-""".strip()
-
-        response = validator.run(
-            prompt,
-            stream=False,
+        response = run_validator_with_citation_check(
+            validator,
+            source_package,
+            research_report,
+            citation_check_json,
         )
 
         validated_report = get_response_content(response)
@@ -885,7 +1060,7 @@ by the provided sources.
         )
 
     # ========================================================
-    # ШАГ 5: ФИНАЛЬНЫЙ ОТВЕТ
+    # ШАГ 6: ФИНАЛЬНЫЙ ОТВЕТ
     # ========================================================
 
     def create_final_answer(
@@ -1028,6 +1203,18 @@ Important:
         hitl_timeout=120,
     )
 
+    citation_step = Step(
+        name="check_research_citations",
+        description=(
+            "Validate cited source IDs with deterministic Python code."
+        ),
+        executor=check_citations,
+        add_workflow_history=False,
+        max_retries=0,
+        on_error="fail",
+        hitl_timeout=120,
+    )
+
     validation_step = Step(
         name="validate_research",
         description=(
@@ -1064,6 +1251,7 @@ Important:
             query_step,
             source_step,
             research_step,
+            citation_step,
             validation_step,
             final_step,
         ],

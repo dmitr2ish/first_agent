@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
-import requests
-
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.ollama import Ollama
-from agno.utils.pprint import pprint_run_response
 from agno.workflow.step import Step, StepInput, StepOutput
 from agno.workflow.workflow import Workflow
 
-import official_sources
-from experiment_reporter import ExperimentReporter, ExperimentConfig
 from official_sources import collect_official_sources_data
+from project_config import (
+    DATABASE_FILE,
+    MAX_HISTORY_RUNS,
+    MAX_SOURCE_PAGES,
+    MODEL_OPTIONS,
+    SESSION_ID,
+)
 from source_analysis_tools import (
     check_source_ids,
     list_official_sources,
@@ -27,74 +28,8 @@ from source_analysis_tools import (
     trace_tool_call,
 )
 
-DATABASE_FILE = "visa_assistant_data.db"
-SESSION_ID = "visa-cli-main"
-
-MAX_HISTORY_RUNS = 4
-MAX_SOURCE_PAGES = 5
-
-MODEL_OPTIONS = {
-    "temperature": 0.0,
-    "num_ctx": 16384,
-}
-
-WORKFLOW_VERSION = "1.0.0"
-PROMPT_VERSION = "visa-prompts-2026-07-21-v1"
-SOURCE_COLLECTOR_VERSION = "official-sources-v1"
-
-
 # ============================================================
-# 1. ВЫБОР МОДЕЛИ
-# ============================================================
-
-def choose_model() -> Any | None:
-    """Получает список локальных моделей Ollama."""
-
-    print("\n[^-^] Получаю список доступных моделей Ollama...")
-
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=10)
-        response.raise_for_status()
-
-        models_data = response.json().get("models", [])
-        available_models = [
-            model["name"]
-            for model in models_data
-            if model.get("name")
-        ]
-
-        if not available_models:
-            raise RuntimeError("Нет доступных моделей. Выполните: ollama pull qwen2.5:14b")
-
-        print("\n==== Доступные модели ====")
-
-        for index, model_name in enumerate(available_models, start=1):
-            print(f"{index}. {model_name}")
-
-        print("=" * 26)
-
-        while True:
-            raw_choice = input("\nВыберите номер модели: ").strip()
-
-            try:
-                choice = int(raw_choice)
-            except ValueError:
-                print("Введите число.")
-                continue
-
-            if 1 <= choice <= len(available_models):
-                selected_model = available_models[choice - 1]
-                print(f"Выбрана модель: {selected_model}")
-                return selected_model
-
-            print("Неверный номер модели.")
-
-    except requests.RequestException as error:
-        raise RuntimeError("Не удалось подключиться к Ollama. Убедитесь, что Ollama запущена.") from error
-
-
-# ============================================================
-# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_response_content(response: Any) -> str:
@@ -754,70 +689,8 @@ def build_researcher_step_output(
     )
 
 
-def get_git_commit() -> str:
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "rev-parse",
-                "--short",
-                "HEAD",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        return result.stdout.strip()
-
-    except (
-        subprocess.SubprocessError,
-        FileNotFoundError,
-    ):
-        return "unknown"
-
-def run_benchmark(
-    *,
-    workflow: Workflow,
-    reporter: ExperimentReporter,
-    experiment_run_id: int,
-    questions: list[str],
-) -> None:
-    for index, question in enumerate(questions, start=1):
-        print(
-            f"\n[Benchmark {index}/{len(questions)}] "
-            f"{question}"
-        )
-
-        try:
-            response = workflow.run(
-                input=question,
-                session_id=(
-                    f"benchmark-run-{experiment_run_id}"
-                ),
-                additional_data={
-                    "experiment_run_id": experiment_run_id,
-                },
-                stream=False,
-            )
-
-            reporter.record_workflow_result(
-                experiment_run_id=experiment_run_id,
-                question=question,
-                workflow_response=response,
-            )
-
-        except Exception as error:
-            reporter.record_failure(
-                experiment_run_id=experiment_run_id,
-                question=question,
-                error=error,
-            )
-
-    reporter.finish_run(experiment_run_id)
 # ============================================================
-# 3. СОЗДАНИЕ WORKFLOW
+# 2. СОЗДАНИЕ WORKFLOW
 # ============================================================
 
 def init_visa_workflow(model_name: str) -> Workflow:
@@ -1035,13 +908,13 @@ def init_visa_workflow(model_name: str) -> Workflow:
         prompt = f"""
                 CURRENT USER REQUEST:
                 {question}
-                
+
                 PREVIOUS CONVERSATION:
                 {history_context}
-                
+
                 Create one standalone English search query for official US
                 government immigration sources.
-                
+
                 The query must contain enough context to be understood without
                 the previous conversation.
                 """.strip()
@@ -1533,175 +1406,3 @@ Important:
         debug_mode=True,
         cache_session=True,
     )
-
-
-# ============================================================
-# 4. CLI
-# ============================================================
-
-def is_greeting(message: str) -> bool:
-    normalized = message.casefold().strip()
-
-    greetings = {
-        "привет",
-        "здравствуйте",
-        "добрый день",
-        "добрый вечер",
-        "hello",
-        "hi",
-        "hey",
-    }
-
-    return normalized in greetings
-
-
-def main() -> None:
-    selected_model = choose_model()
-
-    reporter = ExperimentReporter(
-        db_path="reports/experiment_results.db",
-        xlsx_path="reports/visa_model_comparison.xlsx",
-    )
-
-    experiment_config = ExperimentConfig(
-        model_name=selected_model,
-        model_options=MODEL_OPTIONS,
-        workflow_version=WORKFLOW_VERSION,
-        prompt_version=PROMPT_VERSION,
-        source_collector_version=SOURCE_COLLECTOR_VERSION,
-        max_source_pages=5,
-        allowed_domains=official_sources.ALLOWED_DOMAINS,
-        git_commit=get_git_commit(),
-        notes="Initial deterministic workflow test",
-    )
-
-    experiment_run_id = reporter.start_run(experiment_config)
-
-    print(
-        "\n[Experiment] Начат запуск "
-        f"№{reporter.get_run_number(experiment_run_id)}"
-    )
-
-    workflow = init_visa_workflow(model_name=selected_model)
-
-    print("\n" + "=" * 60)
-    print("ИИ-ассистент по визам и иммиграции США")
-    print("Используются официальные государственные источники.")
-    print("Команды: /exit, /change_model")
-    print("=" * 60)
-
-    while True:
-        try:
-            user_query = input("\n👤 Ваш запрос:\n> ").strip()
-
-            if not user_query:
-                continue
-
-            command = user_query.casefold()
-
-            if command == "/exit":
-                reporter.finish_run(experiment_run_id)
-                print("\nДо свидания!")
-                break
-
-            if command == "/new_run":
-                reporter.finish_run(experiment_run_id)
-
-                experiment_run_id = reporter.start_run(
-                    ExperimentConfig(
-                        model_name=selected_model,
-                        model_options=MODEL_OPTIONS,
-                        workflow_version=WORKFLOW_VERSION,
-                        prompt_version=PROMPT_VERSION,
-                        source_collector_version=(
-                            SOURCE_COLLECTOR_VERSION
-                        ),
-                        max_source_pages=5,
-                        allowed_domains=official_sources.ALLOWED_DOMAINS,
-                        notes="Manual new experiment run",
-                    )
-                )
-
-                print(
-                    "\n[Experiment] Начат запуск "
-                    f"№{reporter.get_run_number(experiment_run_id)}"
-                )
-                continue
-
-            if command == "/change_model":
-                reporter.finish_run(experiment_run_id)
-
-                selected_model = choose_model()
-                workflow = init_visa_workflow(model_name=selected_model)
-
-                experiment_run_id = reporter.start_run(
-                    ExperimentConfig(
-                        model_name=selected_model,
-                        model_options=MODEL_OPTIONS,
-                        workflow_version=WORKFLOW_VERSION,
-                        prompt_version=PROMPT_VERSION,
-                        source_collector_version=(
-                            SOURCE_COLLECTOR_VERSION
-                        ),
-                        max_source_pages=5,
-                        allowed_domains=official_sources.ALLOWED_DOMAINS,
-                        notes="Run created after model change",
-                    )
-                )
-
-                print(
-                    "\n[Experiment] Начат запуск "
-                    f"№{reporter.get_run_number(experiment_run_id)}"
-                )
-                continue
-
-            # На приветствие не нужно запускать полный research.
-            if is_greeting(user_query):
-                print(
-                    "\nЗдравствуйте! Задайте вопрос о визах "
-                    "или иммиграции США."
-                )
-                continue
-
-            print("\n[Workflow] Запускаю проверенный pipeline...")
-
-            response = workflow.run(
-                input=user_query,
-                session_id=SESSION_ID,
-                additional_data={
-                    "experiment_run_id": experiment_run_id,
-                    "model_name": selected_model,
-                    "model_options": MODEL_OPTIONS,
-                    "workflow_version": WORKFLOW_VERSION,
-                    "prompt_version": PROMPT_VERSION,
-                    "source_collector_version": SOURCE_COLLECTOR_VERSION,
-                },
-                stream=False,
-            )
-
-            reporter.record_workflow_result(
-                experiment_run_id=experiment_run_id,
-                question=user_query,
-                workflow_response=response,
-            )
-
-            pprint_run_response(
-                response,
-                markdown=True,
-            )
-
-            print(
-                "\n[Report] Результат сохранён в "
-                "reports/visa_model_comparison.xlsx"
-            )
-
-        except KeyboardInterrupt:
-            print("\n\nРабота завершена.")
-            break
-
-        except Exception as error:
-            print(f"\n[!] Ошибка Workflow: {error}")
-
-
-if __name__ == "__main__":
-    main()

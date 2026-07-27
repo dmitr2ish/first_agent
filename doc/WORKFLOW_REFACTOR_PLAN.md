@@ -286,6 +286,7 @@ Validator и является authoritative для синтаксиса и су�
 ```text
 visa_workflow.py          # сборка Workflow и шаги
 visa_cli.py               # интерактивный запуск
+project_config.py         # общая конфигурация и версии
 official_sources.py       # внешний retrieval
 source_analysis_tools.py  # LLM tools над загруженными данными
 experiment_reporter.py    # SQLite и XLSX
@@ -294,20 +295,20 @@ benchmark_questions.json  # тестовый набор
 tests/                    # автоматические тесты
 ```
 
-- [ ] Вынести CLI из `visa_workflow.py`.
-- [ ] Вынести benchmark runner из `visa_workflow.py`.
-- [ ] Оставить в `visa_workflow.py` конфигурацию агентов и шагов Workflow.
-- [ ] Удалить неиспользуемые импорты и дублирующие функции.
-- [ ] Централизовать версии Workflow, prompts и source collector.
-- [ ] Сохранить существующее поведение CLI и Workflow.
+- [x] Вынести CLI из `visa_workflow.py`.
+- [x] Вынести benchmark runner из `visa_workflow.py`.
+- [x] Оставить в `visa_workflow.py` конфигурацию агентов и шагов Workflow.
+- [x] Удалить неиспользуемые импорты и дублирующие функции.
+- [x] Централизовать версии Workflow, prompts и source collector.
+- [x] Сохранить существующее поведение CLI и Workflow.
 
 ### Обязательные тесты
 
-- [ ] Все unit-тесты предыдущих этапов проходят после перемещения кода.
-- [ ] Smoke-тест импорта каждого нового модуля.
-- [ ] Smoke-тест запуска CLI до приглашения пользователя.
-- [ ] Smoke-тест запуска benchmark runner.
-- [ ] Проверка отсутствия циклических импортов.
+- [x] Все unit-тесты предыдущих этапов проходят после перемещения кода.
+- [x] Smoke-тест импорта каждого нового модуля.
+- [x] Smoke-тест запуска CLI до приглашения пользователя.
+- [x] Smoke-тест запуска benchmark runner.
+- [x] Проверка отсутствия циклических импортов.
 
 ### Критерий готовности
 
@@ -315,7 +316,26 @@ tests/                    # автоматические тесты
 
 ### Результат проверки
 
-Пока не выполнено.
+27 июля 2026 года: интерактивный entry point перенесён в `visa_cli.py`,
+benchmark entry point — в `benchmark_runner.py`, а runtime-константы и версии
+Workflow, prompts и source collector — в `project_config.py`.
+`visa_workflow.py` больше не содержит model selector, CLI loop, benchmark
+runner или report configuration и отвечает за сборку Workflow и его шаги.
+
+Старый неиспользуемый Team-based прототип `visa_assistant.py` перенесён из
+корня проекта в `phase_1/archive/visa_assistant.py`. Текущий CLI запускается
+командой `venv/bin/python visa_cli.py`; benchmark имеет отдельный
+аргументированный запуск через `benchmark_runner.py`.
+
+Все 48 тестов проходят. Добавлены smoke-тесты импортов в разных порядках,
+сборки Workflow с исходной последовательностью шести шагов, запуска CLI до
+приглашения пользователя, `benchmark_runner.py --help` и benchmark run с
+изолированными fake-зависимостями. Циклических импортов и неиспользуемых
+импортов в новых runtime-модулях не обнаружено. Критерий готовности этапа
+выполнен.
+
+Подробности сохранены в
+[`doc/phase_5_report.md`](phase_5_report.md).
 
 ## Этап 6. Расширение benchmark-отчётности
 

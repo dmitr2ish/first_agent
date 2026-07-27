@@ -28,5 +28,11 @@
   отдельный контроль tool calls, проверка evidence и запрет новых URL или
   source IDs.
 
+## Этап 5. Рефакторинг структуры проекта
+
+- [Отчёт о выполнении этапа 5](phase_5_report.md) — разделение Workflow, CLI,
+  benchmark runner и общей конфигурации, smoke-тесты entry points и проверка
+  отсутствия циклических импортов.
+
 Общий план дальнейшего рефакторинга находится в
 [`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

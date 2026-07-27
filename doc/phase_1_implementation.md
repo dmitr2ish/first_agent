@@ -291,7 +291,7 @@ curl http://localhost:11434/api/tags
 ### 10.3. Интерактивный запуск
 
 ```bash
-venv/bin/python visa_workflow.py
+venv/bin/python visa_cli.py
 ```
 
 После выбора модели можно задать вопрос:

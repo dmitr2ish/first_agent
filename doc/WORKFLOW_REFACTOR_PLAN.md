@@ -230,24 +230,24 @@ Validator и является authoritative для синтаксиса и су�
 
 ## Этап 4. Подключение tools к Validator
 
-- [ ] Передать Validator инструменты:
+- [x] Передать Validator инструменты:
   - `check_source_ids`;
   - `read_official_source`;
   - при необходимости `search_official_sources`.
-- [ ] Передавать source package через `dependencies`.
-- [ ] Передавать программный citation-check в prompt Validator.
-- [ ] Обновить инструкции Validator для выборочной проверки ключевых утверждений.
-- [ ] Ограничить число tool calls Validator.
-- [ ] Проверять tool calls Validator отдельно от tool calls Researcher.
-- [ ] Не разрешать Validator добавлять факты, отсутствующие в источниках.
+- [x] Передавать source package через `dependencies`.
+- [x] Передавать программный citation-check в prompt Validator.
+- [x] Обновить инструкции Validator для выборочной проверки ключевых утверждений.
+- [x] Ограничить число tool calls Validator.
+- [x] Проверять tool calls Validator отдельно от tool calls Researcher.
+- [x] Не разрешать Validator добавлять факты, отсутствующие в источниках.
 
 ### Обязательные тесты
 
-- [ ] Unit-тест `check_source_ids` с валидными и невалидными IDs.
-- [ ] Интеграционный тест Validator с неверной визовой классификацией.
-- [ ] Интеграционный тест Validator с выдуманным source ID.
-- [ ] Интеграционный тест Validator с неподтверждённым утверждением.
-- [ ] Проверка, что исправленный отчёт не содержит новых URL или source IDs.
+- [x] Unit-тест `check_source_ids` с валидными и невалидными IDs.
+- [x] Интеграционный тест Validator с неверной визовой классификацией.
+- [x] Интеграционный тест Validator с выдуманным source ID.
+- [x] Интеграционный тест Validator с неподтверждённым утверждением.
+- [x] Проверка, что исправленный отчёт не содержит новых URL или source IDs.
 
 ### Критерий готовности
 
@@ -255,7 +255,29 @@ Validator и является authoritative для синтаксиса и су�
 
 ### Результат проверки
 
-Пока не выполнено.
+26 июля 2026 года: Validator получил `check_source_ids`,
+`read_official_source` и `search_official_sources`, общий
+`trace_tool_call`, лимит в шесть вызовов и source package через
+`dependencies`. Его tool calls собираются в отдельный `ValidatorRunResult` и
+не смешиваются с метриками Researcher. Вызов только `check_source_ids` не
+считается чтением evidence; при отсутствии `read` или успешного `search`
+выполняется ровно один контролируемый retry.
+
+Добавлена детерминированная постпроверка результата Validator. Исправленный
+отчёт отклоняется, если содержит неизвестный source ID, новый source ID или
+новый URL. Проверяются любые токены вида `S<number>`, в том числе без
+квадратных скобок. Ошибки Validator фатальны для Workflow:
+`max_retries=0`, `on_error="fail"`.
+
+Все 42 теста проходят. `check_source_ids` зарегистрирован у Validator и
+проверен unit-тестом с valid/invalid IDs. Финальный интеграционный запуск с
+`qwen2.5:14b`, в котором source content отсутствовал в prompt, выполнил
+`read_official_source`, исправил O-1A с immigrant на nonimmigrant, полностью
+удалил неподтверждённую гарантию и любое упоминание `S99`, сохранил `[S1]` и
+не добавил URL или новых IDs. Критерий готовности этапа выполнен.
+
+Подробности сохранены в
+[`doc/phase_4_report.md`](phase_4_report.md).
 
 ## Этап 5. Рефакторинг структуры проекта
 

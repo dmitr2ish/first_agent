@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from agno.run import RunContext
 
 from source_analysis_tools import (
+    check_source_ids,
     list_official_sources,
     read_official_source,
     search_official_sources,
@@ -105,6 +106,18 @@ class SourceAnalysisToolsTests(unittest.TestCase):
     def test_invalid_source_package_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing or invalid"):
             list_official_sources(make_context(None))
+
+    def test_check_source_ids_returns_valid_and_invalid_ids(self) -> None:
+        result = json.loads(
+            check_source_ids(
+                ["s1", "S99"],
+                run_context=self.context,
+            )
+        )
+
+        self.assertEqual(result["valid"], ["S1"])
+        self.assertEqual(result["invalid"], ["S99"])
+        self.assertEqual(result["available"], ["S1", "S2"])
 
     def test_trace_hook_prints_name_arguments_result_and_time(self) -> None:
         stdout = io.StringIO()

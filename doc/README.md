@@ -22,5 +22,11 @@
   извлечение citations, обнаружение недопустимых source IDs, отдельный шаг
   Workflow и передача результата Validator.
 
+## Этап 4. Подключение tools к Validator
+
+- [Отчёт о выполнении этапа 4](phase_4_report.md) — source tools Validator,
+  отдельный контроль tool calls, проверка evidence и запрет новых URL или
+  source IDs.
+
 Общий план дальнейшего рефакторинга находится в
 [`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

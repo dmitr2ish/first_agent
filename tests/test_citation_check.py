@@ -115,6 +115,14 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(payload["invalid_source_ids"], ["S99"])
 
     def test_validator_prompt_contains_programmatic_result(self) -> None:
+        package_with_secret_content = {
+            "sources": [
+                {
+                    "source_id": "S1",
+                    "content": "SECRET VALIDATOR EVIDENCE",
+                },
+            ],
+        }
         citation_json = citation_check_to_json(
             check_report_citations(
                 "Invented claim [S99].",
@@ -122,7 +130,7 @@ class CitationCheckTests(unittest.TestCase):
             )
         )
         prompt = build_validator_prompt(
-            json.dumps(self.source_package),
+            json.dumps(package_with_secret_content),
             "Invented claim [S99].",
             citation_json,
         )
@@ -131,6 +139,7 @@ class CitationCheckTests(unittest.TestCase):
         self.assertIn('"invalid_source_ids": [', prompt)
         self.assertIn('"S99"', prompt)
         self.assertIn("Do not invent replacement source IDs.", prompt)
+        self.assertNotIn("SECRET VALIDATOR EVIDENCE", prompt)
 
     def test_programmatic_result_is_passed_to_validator_run(self) -> None:
         validator = RecordingValidator()
@@ -154,6 +163,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertIn('"citation_count": 1', prompt)
         self.assertIn('"invalid_source_ids": []', prompt)
         self.assertFalse(kwargs["stream"])
+        self.assertEqual(
+            kwargs["dependencies"]["source_package"],
+            self.source_package,
+        )
 
 
 if __name__ == "__main__":

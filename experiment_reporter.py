@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,6 +28,12 @@ INTERACTION_MIGRATION_COLUMNS = {
     "researcher_success": "INTEGER",
     "validator_success": "INTEGER",
     "final_status": "TEXT NOT NULL DEFAULT 'unknown'",
+    "benchmark_scenario_id": "TEXT",
+    "benchmark_scenario_type": "TEXT",
+    "benchmark_turn_id": "TEXT",
+    "benchmark_turn_number": "INTEGER",
+    "benchmark_pass": "INTEGER",
+    "benchmark_failure_reasons": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 
@@ -49,6 +55,9 @@ class ExperimentConfig:
     allowed_domains: list[str]
     git_commit: str
     notes: str = ""
+    benchmark_version: str = ""
+    benchmark_config_digest: str = ""
+    component_versions: dict[str, str] = field(default_factory=dict)
 
 
 class ExperimentReporter:
@@ -130,6 +139,12 @@ class ExperimentReporter:
                     researcher_success INTEGER,
                     validator_success INTEGER,
                     final_status TEXT NOT NULL DEFAULT 'unknown',
+                    benchmark_scenario_id TEXT,
+                    benchmark_scenario_type TEXT,
+                    benchmark_turn_id TEXT,
+                    benchmark_turn_number INTEGER,
+                    benchmark_pass INTEGER,
+                    benchmark_failure_reasons TEXT NOT NULL DEFAULT '[]',
                     error TEXT,
 
                     FOREIGN KEY (experiment_run_id)
@@ -307,6 +322,7 @@ class ExperimentReporter:
         workflow_response: Any,
         sources: list[dict[str, Any]] | None = None,
         error: str | None = None,
+        benchmark_context: dict[str, Any] | None = None,
     ) -> None:
         """
         Сохраняет завершённый WorkflowRunOutput.
@@ -363,6 +379,10 @@ class ExperimentReporter:
             sources=extracted_sources,
             tool_calls=tool_calls,
         )
+        benchmark_fields = self._build_benchmark_fields(
+            benchmark_context=benchmark_context,
+            reporting_metrics=reporting_metrics,
+        )
 
         input_tokens = self._to_optional_int(
             metrics_dict.get("input_tokens")
@@ -412,11 +432,17 @@ class ExperimentReporter:
                     researcher_success,
                     validator_success,
                     final_status,
+                    benchmark_scenario_id,
+                    benchmark_scenario_type,
+                    benchmark_turn_id,
+                    benchmark_turn_number,
+                    benchmark_pass,
+                    benchmark_failure_reasons,
                     error
                 )
                 VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -466,6 +492,15 @@ class ExperimentReporter:
                     reporting_metrics["researcher_success"],
                     reporting_metrics["validator_success"],
                     reporting_metrics["final_status"],
+                    benchmark_fields["benchmark_scenario_id"],
+                    benchmark_fields["benchmark_scenario_type"],
+                    benchmark_fields["benchmark_turn_id"],
+                    benchmark_fields["benchmark_turn_number"],
+                    benchmark_fields["benchmark_pass"],
+                    json.dumps(
+                        benchmark_fields["benchmark_failure_reasons"],
+                        ensure_ascii=False,
+                    ),
                     error,
                 ),
             )
@@ -485,12 +520,18 @@ class ExperimentReporter:
         experiment_run_id: int,
         question: str,
         error: Exception | str,
+        session_id: str | None = None,
+        benchmark_context: dict[str, Any] | None = None,
     ) -> None:
         question_number = self._next_question_number(
             experiment_run_id
         )
 
         error_text = str(error)
+        benchmark_fields = self._build_benchmark_fields(
+            benchmark_context=benchmark_context,
+            reporting_metrics=None,
+        )
 
         with self._connect() as connection:
             connection.execute(
@@ -498,23 +539,42 @@ class ExperimentReporter:
                 INSERT INTO interactions (
                     experiment_run_id,
                     question_number,
+                    session_id,
                     created_at_utc,
                     question,
                     answer,
                     status,
                     final_status,
+                    benchmark_scenario_id,
+                    benchmark_scenario_type,
+                    benchmark_turn_id,
+                    benchmark_turn_number,
+                    benchmark_pass,
+                    benchmark_failure_reasons,
                     error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     experiment_run_id,
                     question_number,
+                    session_id,
                     datetime.now(timezone.utc).isoformat(),
                     question,
                     "",
                     "failed",
                     "failed",
+                    benchmark_fields["benchmark_scenario_id"],
+                    benchmark_fields["benchmark_scenario_type"],
+                    benchmark_fields["benchmark_turn_id"],
+                    benchmark_fields["benchmark_turn_number"],
+                    benchmark_fields["benchmark_pass"],
+                    json.dumps(
+                        benchmark_fields["benchmark_failure_reasons"],
+                        ensure_ascii=False,
+                    ),
                     error_text,
                 ),
             )
@@ -804,6 +864,81 @@ class ExperimentReporter:
         }
 
     @staticmethod
+    def _workflow_status_succeeded(status: Any) -> bool:
+        normalized = str(status or "").strip().casefold()
+        normalized = normalized.rsplit(".", maxsplit=1)[-1]
+        return normalized in {
+            "complete",
+            "completed",
+            "success",
+            "succeeded",
+        }
+
+    def _build_benchmark_fields(
+            self,
+            *,
+            benchmark_context: dict[str, Any] | None,
+            reporting_metrics: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        context = (
+            benchmark_context
+            if isinstance(benchmark_context, dict)
+            else {}
+        )
+        scenario_id = str(context.get("scenario_id") or "").strip()
+
+        if not scenario_id:
+            return {
+                "benchmark_scenario_id": None,
+                "benchmark_scenario_type": None,
+                "benchmark_turn_id": None,
+                "benchmark_turn_number": None,
+                "benchmark_pass": None,
+                "benchmark_failure_reasons": [],
+            }
+
+        failure_reasons: list[str] = []
+
+        if reporting_metrics is None:
+            failure_reasons.append("workflow_failed")
+        else:
+            if not self._workflow_status_succeeded(
+                    reporting_metrics.get("final_status")
+            ):
+                failure_reasons.append("workflow_not_successful")
+
+            if int(reporting_metrics.get("source_count") or 0) <= 0:
+                failure_reasons.append("no_sources")
+
+            if not bool(
+                    reporting_metrics.get("evidence_read_performed")
+            ):
+                failure_reasons.append("evidence_not_read")
+
+            if reporting_metrics.get("invalid_source_ids"):
+                failure_reasons.append("invalid_source_ids")
+
+            if int(reporting_metrics.get("citation_count") or 0) <= 0:
+                failure_reasons.append("no_citations")
+
+        return {
+            "benchmark_scenario_id": scenario_id,
+            "benchmark_scenario_type": (
+                str(context.get("scenario_type") or "").strip()
+                or None
+            ),
+            "benchmark_turn_id": (
+                str(context.get("turn_id") or "").strip()
+                or None
+            ),
+            "benchmark_turn_number": self._to_optional_int(
+                context.get("turn_number")
+            ),
+            "benchmark_pass": int(not failure_reasons),
+            "benchmark_failure_reasons": failure_reasons,
+        }
+
+    @staticmethod
     def _insert_tool_calls(
             connection: sqlite3.Connection,
             *,
@@ -1085,6 +1220,12 @@ class ExperimentReporter:
             "Researcher Success",
             "Validator Success",
             "Final Status",
+            "Benchmark Scenario",
+            "Scenario Type",
+            "Turn ID",
+            "Turn #",
+            "Benchmark Pass",
+            "Benchmark Failure Reasons",
             "Error",
         ]
 
@@ -1133,6 +1274,16 @@ class ExperimentReporter:
                         interaction["validator_success"]
                     ),
                     interaction["final_status"],
+                    interaction["benchmark_scenario_id"],
+                    interaction["benchmark_scenario_type"],
+                    interaction["benchmark_turn_id"],
+                    interaction["benchmark_turn_number"],
+                    self._optional_bool(
+                        interaction["benchmark_pass"]
+                    ),
+                    self._json_list_text(
+                        interaction["benchmark_failure_reasons"]
+                    ),
                     interaction["error"],
                 ]
             )
@@ -1427,6 +1578,7 @@ class ExperimentReporter:
             elif header in {
                 "Used Source IDs",
                 "Invalid Source IDs",
+                "Benchmark Failure Reasons",
             }:
                 width = 24
             elif header.startswith("Sources "):
@@ -1449,6 +1601,7 @@ class ExperimentReporter:
                     or header in {
                         "Run",
                         "Question #",
+                        "Turn #",
                         "Sequence",
                         "Attempt",
                         "Input Tokens",

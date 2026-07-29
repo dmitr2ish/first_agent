@@ -40,5 +40,10 @@
   metrics, отдельные tool-call события, миграция SQLite и лист `Tool Calls` в
   восстанавливаемом XLSX.
 
+## Этап 7. Benchmark-набор и изоляция сценариев
+
+- [Отчёт о выполнении этапа 7](phase_7_report.md) — versioned scenarios,
+  session isolation, автоматический технический pass/fail и production smoke.
+
 Общий план дальнейшего рефакторинга находится в
 [`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

@@ -329,6 +329,48 @@ class ExperimentReporterTests(unittest.TestCase):
 
         self.assertEqual(row, ("failed", "failed", 0))
 
+    def test_benchmark_criterion_records_failure_reasons(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        response.status = "completed"
+        response.step_results = [
+            step
+            for step in response.step_results
+            if step.step_name != "collect_official_sources"
+        ]
+
+        reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Benchmark question?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "no-sources",
+                "scenario_type": "independent",
+                "turn_id": "question",
+                "turn_number": 1,
+            },
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[0], 0)
+        self.assertEqual(
+            json.loads(row[1]),
+            ["no_sources", "invalid_source_ids"],
+        )
+
     def test_migrates_existing_phase_5_database(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
             connection.executescript(
@@ -427,6 +469,7 @@ class ExperimentReporterTests(unittest.TestCase):
                 "citation_count",
                 "validator_success",
                 "final_status",
+                "benchmark_pass",
             }.issubset(columns)
         )
         self.assertEqual(migrated, (0, "[]", "unknown"))

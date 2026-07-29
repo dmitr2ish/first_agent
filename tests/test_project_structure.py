@@ -61,6 +61,8 @@ class ProjectStructureTests(unittest.TestCase):
         self.assertEqual(project_config.WORKFLOW_VERSION, "1.0.0")
         self.assertTrue(project_config.PROMPT_VERSION)
         self.assertTrue(project_config.SOURCE_COLLECTOR_VERSION)
+        self.assertTrue(project_config.BENCHMARK_SCHEMA_VERSION)
+        self.assertIn("python", project_config.get_component_versions())
 
     def test_workflow_factory_preserves_step_sequence(self) -> None:
         workflow = visa_workflow.init_visa_workflow("test-model")
@@ -149,7 +151,24 @@ class ProjectStructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_directory:
             questions_path = Path(temp_directory) / "questions.json"
             questions_path.write_text(
-                json.dumps(["Question one?"]),
+                json.dumps(
+                    {
+                        "version": "test-v1",
+                        "scenarios": [
+                            {
+                                "id": "question-one",
+                                "title": "Question one",
+                                "type": "independent",
+                                "turns": [
+                                    {
+                                        "id": "turn-one",
+                                        "prompt": "Question one?",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
 

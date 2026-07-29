@@ -1,0 +1,4 @@
+-r requirements.lock
+
+# Used only to render the demonstration tool-trace image.
+pillow==12.3.0

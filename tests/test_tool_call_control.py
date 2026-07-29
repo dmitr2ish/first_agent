@@ -20,15 +20,25 @@ def tool(
         *,
         error: bool = False,
         duration: float | None = None,
+        arguments: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     metrics = (
         SimpleNamespace(duration=duration)
         if duration is not None
         else None
     )
+    if arguments is None:
+        arguments = {}
+
+        if name == "read_official_source" and isinstance(result, dict):
+            source_id = result.get("source_id")
+
+            if source_id:
+                arguments["source_id"] = source_id
+
     return SimpleNamespace(
         tool_name=name,
-        tool_args={"example": True},
+        tool_args=arguments,
         tool_call_error=error,
         result=(
             result
@@ -89,6 +99,7 @@ class ToolCallSummaryTests(unittest.TestCase):
 
         self.assertTrue(summary.evidence_read_performed)
         self.assertEqual(summary.total_duration_seconds, 0.25)
+        self.assertEqual(summary.evidence_source_ids, ("S1",))
 
     def test_successful_read_with_content_reads_evidence(self) -> None:
         summary = summarize_tool_calls(
@@ -103,6 +114,7 @@ class ToolCallSummaryTests(unittest.TestCase):
 
         self.assertTrue(summary.evidence_read_performed)
         self.assertEqual(summary.successful_count, 1)
+        self.assertEqual(summary.evidence_source_ids, ("S1",))
 
     def test_execution_error_is_counted(self) -> None:
         summary = summarize_tool_calls(
@@ -305,6 +317,7 @@ class ResearcherEvidenceControlTests(unittest.TestCase):
 
         workflow = Workflow(
             id="missing-evidence-test-workflow",
+            telemetry=False,
             steps=[
                 Step(
                     name="research",
@@ -355,6 +368,7 @@ class ResearcherEvidenceControlTests(unittest.TestCase):
 
         workflow = Workflow(
             id="successful-evidence-test-workflow",
+            telemetry=False,
             steps=[
                 Step(
                     name="research",

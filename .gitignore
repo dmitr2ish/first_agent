@@ -1,8 +1,37 @@
+# IDE and operating-system files
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local Python environments and caches
 venv/
+.venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime databases and reports
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 *.xlsx
+*.log
 reports/
+
+# Local agent instructions
 doc/AGENTS.md

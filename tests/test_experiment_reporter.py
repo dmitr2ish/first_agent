@@ -11,7 +11,11 @@ from agno.metrics import RunMetrics
 from agno.workflow.step import StepOutput
 from openpyxl import load_workbook
 
-from experiment_reporter import ExperimentConfig, ExperimentReporter
+from experiment_reporter import (
+    ExperimentConfig,
+    ExperimentReporter,
+    ReportExportWarning,
+)
 
 
 def telemetry_metrics(payload: dict) -> RunMetrics:
@@ -39,6 +43,7 @@ def tool_call(
         "error": error,
         "duration_seconds": 0.25,
         "evidence_read": evidence_read,
+        "evidence_source_ids": ["S1"] if evidence_read else [],
         "result_preview": result_preview,
     }
 
@@ -132,6 +137,11 @@ class ExperimentReporterTests(unittest.TestCase):
             },
             step_results=[
                 StepOutput(
+                    step_name="build_search_query",
+                    content="official visa query",
+                    success=True,
+                ),
+                StepOutput(
                     step_name="collect_official_sources",
                     content=json.dumps(source_package),
                     success=True,
@@ -181,6 +191,22 @@ class ExperimentReporterTests(unittest.TestCase):
                 StepOutput(
                     step_name="create_final_answer",
                     content="final answer",
+                    metrics=telemetry_metrics(
+                        {
+                            "final_safety_check": {
+                                "blocked": False,
+                                "matched_patterns": [],
+                            },
+                            "final_output_check": {
+                                "citation_count": 1,
+                                "used_source_ids": ["S1"],
+                                "invalid_source_ids": [],
+                                "passed": True,
+                                "citations_required": True,
+                                "safety_policy_pass": True,
+                            },
+                        }
+                    ),
                     success=True,
                 ),
             ],
@@ -232,6 +258,22 @@ class ExperimentReporterTests(unittest.TestCase):
         self.assertEqual(interaction["researcher_success"], 1)
         self.assertEqual(interaction["validator_success"], 1)
         self.assertEqual(interaction["final_status"], "completed")
+        self.assertEqual(interaction["final_safety_blocked"], 0)
+        self.assertEqual(interaction["final_citation_count"], 1)
+        self.assertEqual(
+            json.loads(interaction["final_used_source_ids"]),
+            ["S1"],
+        )
+        self.assertEqual(
+            json.loads(interaction["final_invalid_source_ids"]),
+            [],
+        )
+        self.assertEqual(interaction["final_output_policy_pass"], 1)
+        self.assertEqual(interaction["final_safety_policy_pass"], 1)
+        self.assertEqual(
+            json.loads(interaction["evidence_source_ids"]),
+            ["S1"],
+        )
 
     def test_records_multiple_tool_calls_and_tool_error(self) -> None:
         self.populated_reporter()
@@ -255,6 +297,10 @@ class ExperimentReporterTests(unittest.TestCase):
         self.assertEqual(calls[0]["error"], 1)
         self.assertEqual(calls[0]["success"], 0)
         self.assertEqual(calls[1]["evidence_read"], 1)
+        self.assertEqual(
+            json.loads(calls[1]["evidence_source_ids"]),
+            ["S1"],
+        )
         self.assertLessEqual(len(calls[1]["result_preview"]), 240)
 
     def test_xlsx_is_rebuilt_from_sqlite_with_all_sheets(self) -> None:
@@ -270,15 +316,20 @@ class ExperimentReporterTests(unittest.TestCase):
         self.assertEqual(
             workbook.sheetnames,
             [
+                "Benchmark Summary",
                 "Runs",
                 "Interactions",
                 "Step Outputs",
                 "Tool Calls",
             ],
         )
+        self.assertEqual(
+            workbook["Benchmark Summary"].max_row,
+            2,
+        )
         self.assertEqual(workbook["Runs"].max_row, 2)
         self.assertEqual(workbook["Interactions"].max_row, 2)
-        self.assertEqual(workbook["Step Outputs"].max_row, 6)
+        self.assertEqual(workbook["Step Outputs"].max_row, 7)
         self.assertEqual(workbook["Tool Calls"].max_row, 4)
 
         interaction_headers = [
@@ -291,7 +342,20 @@ class ExperimentReporterTests(unittest.TestCase):
         ]
         self.assertIn("Tool Call Count", interaction_headers)
         self.assertIn("Invalid Source IDs", interaction_headers)
+        self.assertIn("Safety Blocked", interaction_headers)
+        self.assertIn("Final Citation Count", interaction_headers)
+        self.assertIn("Final Output Policy Pass", interaction_headers)
+        self.assertIn("Final Safety Policy Pass", interaction_headers)
+        self.assertIn("Evidence Source IDs", interaction_headers)
+        self.assertIn("Technical Pass", interaction_headers)
+        self.assertIn("Semantic Pass", interaction_headers)
+        self.assertIn("Release Pass", interaction_headers)
+        self.assertIn("Evidence Source IDs", tool_headers)
         self.assertIn("Result Preview", tool_headers)
+        self.assertEqual(
+            workbook["Benchmark Summary"]["B2"].value,
+            "test-model",
+        )
         self.assertEqual(
             workbook["Tool Calls"].freeze_panes,
             "A2",
@@ -329,6 +393,38 @@ class ExperimentReporterTests(unittest.TestCase):
 
         self.assertEqual(row, ("failed", "failed", 0))
 
+    def test_updates_post_run_artifact_provenance(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+
+        reporter.update_run_component_versions(
+            experiment_run_id,
+            {
+                "benchmark_evidence_manifest_sha256": "abc123",
+            },
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            configuration_json = connection.execute(
+                """
+                SELECT configuration_json
+                FROM experiment_runs
+                WHERE id = ?
+                """,
+                (experiment_run_id,),
+            ).fetchone()[0]
+
+        configuration = json.loads(configuration_json)
+        self.assertEqual(
+            configuration["component_versions"][
+                "benchmark_evidence_manifest_sha256"
+            ],
+            "abc123",
+        )
+
     def test_benchmark_criterion_records_failure_reasons(self) -> None:
         reporter = ExperimentReporter(
             db_path=str(self.db_path),
@@ -343,7 +439,7 @@ class ExperimentReporterTests(unittest.TestCase):
             if step.step_name != "collect_official_sources"
         ]
 
-        reporter.record_workflow_result(
+        release_pass = reporter.record_workflow_result(
             experiment_run_id=experiment_run_id,
             question="Benchmark question?",
             workflow_response=response,
@@ -354,6 +450,8 @@ class ExperimentReporterTests(unittest.TestCase):
                 "turn_number": 1,
             },
         )
+
+        self.assertIs(release_pass, False)
 
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute(
@@ -368,8 +466,430 @@ class ExperimentReporterTests(unittest.TestCase):
         self.assertEqual(row[0], 0)
         self.assertEqual(
             json.loads(row[1]),
-            ["no_sources", "invalid_source_ids"],
+            [
+                "no_sources",
+                "source_collection_not_successful",
+                "semantic_not_evaluated",
+            ],
         )
+
+    def test_benchmark_distinguishes_technical_semantic_and_release(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+
+        reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Semantically checked question?",
+            workflow_response=self.workflow_response(),
+            benchmark_context={
+                "scenario_id": "semantic-failure",
+                "scenario_type": "independent",
+                "turn_id": "question",
+                "turn_number": 1,
+                "semantic_pass": False,
+                "semantic_failure_reasons": [
+                    "missing_expected_fact",
+                ],
+            },
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_pass,
+                    benchmark_technical_pass,
+                    benchmark_semantic_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons,
+                    semantic_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[:4], (0, 1, 0, 0))
+        self.assertEqual(
+            json.loads(row[4]),
+            ["semantic_check_failed"],
+        )
+        self.assertEqual(
+            json.loads(row[5]),
+            ["missing_expected_fact"],
+        )
+
+    def test_benchmark_requires_researcher_and_validator_steps(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        response.step_results = [
+            step
+            for step in response.step_results
+            if step.step_name != "validate_research"
+        ]
+
+        release_pass = reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Missing validator?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "missing-validator",
+                "scenario_type": "independent",
+            },
+        )
+
+        self.assertIs(release_pass, False)
+        with sqlite3.connect(self.db_path) as connection:
+            reasons_json = connection.execute(
+                """
+                SELECT benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()[0]
+
+        self.assertIn(
+            "validator_not_successful",
+            json.loads(reasons_json),
+        )
+
+    def test_benchmark_requires_every_workflow_step_success(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        query_step = next(
+            step
+            for step in response.step_results
+            if step.step_name == "build_search_query"
+        )
+        query_step.success = False
+
+        release_pass = reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Failed query step?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "failed-query",
+                "scenario_type": "independent",
+                "semantic_pass": True,
+            },
+        )
+
+        self.assertIs(release_pass, False)
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_technical_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[:2], (0, 0))
+        self.assertIn(
+            "query_builder_not_successful",
+            json.loads(row[2]),
+        )
+
+    def test_final_output_telemetry_drives_technical_pass(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        final_step = next(
+            step
+            for step in response.step_results
+            if step.step_name == "create_final_answer"
+        )
+        final_step.metrics = telemetry_metrics(
+            {
+                "final_output_check": {
+                    "citation_count": 0,
+                    "used_source_ids": [],
+                    "invalid_source_ids": ["S99"],
+                    "passed": False,
+                    "citations_required": True,
+                    "safety_policy_pass": True,
+                },
+            }
+        )
+
+        reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Bad final answer?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "bad-final",
+                "scenario_type": "independent",
+                "semantic_pass": True,
+            },
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_technical_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[:2], (0, 0))
+        self.assertEqual(
+            json.loads(row[2]),
+            [
+                "final_output_policy_failed",
+                "final_invalid_source_ids",
+                "no_final_citations",
+            ],
+        )
+
+    def test_old_telemetry_uses_researcher_citation_fallback(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        final_step = next(
+            step
+            for step in response.step_results
+            if step.step_name == "create_final_answer"
+        )
+        final_step.metrics = telemetry_metrics(
+            {
+                "final_safety_check": {
+                    "blocked": False,
+                },
+            }
+        )
+
+        reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Legacy telemetry?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "legacy",
+                "scenario_type": "independent",
+            },
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_technical_pass,
+                    benchmark_failure_reasons,
+                    final_output_policy_pass
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[0], 0)
+        self.assertEqual(
+            json.loads(row[1]),
+            [
+                "invalid_source_ids",
+                "semantic_not_evaluated",
+                "safety_policy_not_evaluated",
+            ],
+        )
+        self.assertIsNone(row[2])
+
+    def test_final_citations_are_optional_when_policy_says_so(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+        response = self.workflow_response()
+        final_step = next(
+            step
+            for step in response.step_results
+            if step.step_name == "create_final_answer"
+        )
+        final_step.metrics = telemetry_metrics(
+            {
+                "final_output_check": {
+                    "citation_count": 0,
+                    "used_source_ids": [],
+                    "invalid_source_ids": [],
+                    "passed": True,
+                    "citations_required": False,
+                    "safety_policy_pass": True,
+                },
+            }
+        )
+
+        release_pass = reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="Neutral fallback?",
+            workflow_response=response,
+            benchmark_context={
+                "scenario_id": "no-citation-required",
+                "scenario_type": "independent",
+                "semantic_pass": True,
+            },
+        )
+
+        self.assertIs(release_pass, True)
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    benchmark_technical_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()
+
+        self.assertEqual(row[:2], (1, 1))
+        self.assertEqual(json.loads(row[2]), [])
+
+    def test_release_fails_when_semantic_check_is_not_evaluated(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+
+        release_pass = reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question="No semantic rubric?",
+            workflow_response=self.workflow_response(),
+            benchmark_context={
+                "scenario_id": "missing-semantic",
+                "scenario_type": "independent",
+            },
+        )
+
+        self.assertIs(release_pass, False)
+        with sqlite3.connect(self.db_path) as connection:
+            reasons_json = connection.execute(
+                """
+                SELECT benchmark_failure_reasons
+                FROM interactions
+                """
+            ).fetchone()[0]
+
+        self.assertEqual(
+            json.loads(reasons_json),
+            ["semantic_not_evaluated"],
+        )
+
+    def test_xlsx_sanitizes_formula_prefixes_and_preserves_types(self) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        config = self.config()
+        malicious_config = ExperimentConfig(
+            **{
+                **config.__dict__,
+                "model_name": "=HYPERLINK(\"https://example.test\")",
+                "notes": "\t@SUM(1,1)",
+            }
+        )
+        experiment_run_id = reporter.start_run(malicious_config)
+        response = self.workflow_response()
+        response.content = "\u200b+CMD"
+        response.run_id = "-RUN"
+        response.session_id = "\x01=SESSION"
+
+        reporter.record_workflow_result(
+            experiment_run_id=experiment_run_id,
+            question=" \t=1+1",
+            workflow_response=response,
+            error="@ERROR",
+        )
+
+        workbook = load_workbook(self.xlsx_path, data_only=False)
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    self.assertNotEqual(
+                        cell.data_type,
+                        "f",
+                        f"{sheet.title}!{cell.coordinate}",
+                    )
+
+        interaction_headers = {
+            cell.value: cell.column
+            for cell in workbook["Interactions"][1]
+        }
+        question_cell = workbook["Interactions"].cell(
+            row=2,
+            column=interaction_headers["Question"],
+        )
+        answer_cell = workbook["Interactions"].cell(
+            row=2,
+            column=interaction_headers["Answer"],
+        )
+        self.assertTrue(question_cell.value.startswith("'"))
+        self.assertTrue(answer_cell.value.startswith("'"))
+        workbook.close()
+
+        self.assertEqual(
+            reporter._sanitize_xlsx_value(-7),
+            -7,
+        )
+        self.assertIs(
+            reporter._sanitize_xlsx_value(True),
+            True,
+        )
+        for value in (
+            "=1+1",
+            "  +SUM(1,1)",
+            "\t-CMD",
+            "\u200b@IMPORT",
+            "\x01=HIDDEN",
+        ):
+            sanitized = reporter._sanitize_xlsx_value(value)
+            self.assertTrue(sanitized.startswith("'"))
+
+    def test_export_failure_does_not_reclassify_persisted_interaction(
+            self,
+    ) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        experiment_run_id = reporter.start_run(self.config())
+
+        def fail_export() -> None:
+            raise PermissionError("workbook is locked")
+
+        reporter.export_xlsx = fail_export  # type: ignore[method-assign]
+
+        with self.assertWarns(ReportExportWarning):
+            reporter.record_workflow_result(
+                experiment_run_id=experiment_run_id,
+                question="Persist despite XLSX failure?",
+                workflow_response=self.workflow_response(),
+            )
+
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT status FROM interactions"
+            ).fetchall()
+
+        self.assertEqual(rows, [("completed",)])
+        self.assertIn("PermissionError", reporter.last_export_error or "")
 
     def test_migrates_existing_phase_5_database(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
@@ -403,8 +923,26 @@ class ExperimentReporterTests(unittest.TestCase):
                     sources_json TEXT NOT NULL DEFAULT '[]',
                     step_outputs_json TEXT NOT NULL DEFAULT '{}',
                     metrics_json TEXT NOT NULL DEFAULT '{}',
+                    benchmark_pass INTEGER,
                     error TEXT,
                     UNIQUE (experiment_run_id, question_number)
+                );
+
+                CREATE TABLE tool_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    interaction_id INTEGER NOT NULL,
+                    sequence_number INTEGER NOT NULL,
+                    step_name TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    tool_name TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL DEFAULT '{}',
+                    success INTEGER NOT NULL,
+                    error INTEGER NOT NULL,
+                    duration_seconds REAL,
+                    evidence_read INTEGER NOT NULL,
+                    result_preview TEXT NOT NULL DEFAULT '',
+                    UNIQUE (interaction_id, sequence_number)
                 );
 
                 INSERT INTO experiment_runs (
@@ -421,7 +959,8 @@ class ExperimentReporterTests(unittest.TestCase):
                     created_at_utc,
                     question,
                     answer,
-                    status
+                    status,
+                    benchmark_pass
                 )
                 VALUES (
                     1,
@@ -429,15 +968,17 @@ class ExperimentReporterTests(unittest.TestCase):
                     '2026-07-26T00:00:00+00:00',
                     'old question',
                     'old answer',
-                    'completed'
+                    'completed',
+                    1
                 );
                 """
             )
 
-        ExperimentReporter(
+        reporter = ExperimentReporter(
             db_path=str(self.db_path),
             xlsx_path=str(self.xlsx_path),
         )
+        reporter.export_xlsx()
 
         with sqlite3.connect(self.db_path) as connection:
             columns = {
@@ -451,10 +992,20 @@ class ExperimentReporterTests(unittest.TestCase):
                 SELECT
                     tool_call_count,
                     tool_names,
-                    final_status
+                    final_status,
+                    benchmark_pass,
+                    benchmark_technical_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons
                 FROM interactions
                 """
             ).fetchone()
+            tool_call_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(tool_calls)"
+                )
+            }
             tool_calls_table = connection.execute(
                 """
                 SELECT name
@@ -469,11 +1020,193 @@ class ExperimentReporterTests(unittest.TestCase):
                 "citation_count",
                 "validator_success",
                 "final_status",
+                "final_safety_blocked",
+                "final_citation_count",
+                "final_used_source_ids",
+                "final_invalid_source_ids",
+                "final_output_policy_pass",
+                "evidence_source_ids",
                 "benchmark_pass",
+                "benchmark_technical_pass",
+                "benchmark_semantic_pass",
+                "benchmark_release_pass",
+                "semantic_failure_reasons",
             }.issubset(columns)
         )
-        self.assertEqual(migrated, (0, "[]", "unknown"))
+        self.assertEqual(
+            migrated[:6],
+            (0, "[]", "unknown", 0, 1, 0),
+        )
+        self.assertEqual(
+            json.loads(migrated[6]),
+            [
+                "semantic_not_evaluated",
+                "safety_policy_not_evaluated",
+            ],
+        )
+        self.assertIn("evidence_source_ids", tool_call_columns)
         self.assertEqual(tool_calls_table, ("tool_calls",))
+
+        workbook = load_workbook(self.xlsx_path, read_only=False)
+        interaction_headers = [
+            cell.value
+            for cell in workbook["Interactions"][1]
+        ]
+        self.assertIn("Final Citation Count", interaction_headers)
+        self.assertIn("Release Pass", interaction_headers)
+        workbook.close()
+
+    def test_repairs_legacy_release_pass_without_semantic_evidence(
+            self,
+    ) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        run_id = reporter.start_run(self.config())
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO interactions (
+                    experiment_run_id,
+                    question_number,
+                    created_at_utc,
+                    question,
+                    answer,
+                    status,
+                    benchmark_pass,
+                    benchmark_technical_pass,
+                    benchmark_semantic_pass,
+                    benchmark_release_pass
+                )
+                VALUES (?, 1, ?, ?, ?, ?, 1, 1, NULL, 1)
+                """,
+                (
+                    run_id,
+                    "2026-07-29T00:00:00+00:00",
+                    "legacy question",
+                    "legacy answer",
+                    "completed",
+                ),
+            )
+
+        ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            migrated = connection.execute(
+                """
+                SELECT
+                    benchmark_pass,
+                    benchmark_technical_pass,
+                    benchmark_semantic_pass,
+                    benchmark_release_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                WHERE experiment_run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        self.assertEqual(migrated[:4], (0, 1, None, 0))
+        self.assertEqual(
+            json.loads(migrated[4]),
+            [
+                "semantic_not_evaluated",
+                "safety_policy_not_evaluated",
+            ],
+        )
+
+    def test_repairs_release_pass_without_persisted_safety_evidence(
+            self,
+    ) -> None:
+        reporter = ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+        run_id = reporter.start_run(self.config())
+        valid_step_outputs = {
+            "create_final_answer": {
+                "metrics": {
+                    "additional_metrics": {
+                        "workflow_telemetry": {
+                            "final_output_check": {
+                                "safety_policy_pass": True,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO interactions (
+                    experiment_run_id,
+                    question_number,
+                    created_at_utc,
+                    question,
+                    answer,
+                    status,
+                    step_outputs_json,
+                    benchmark_pass,
+                    benchmark_technical_pass,
+                    benchmark_semantic_pass,
+                    benchmark_release_pass
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1)
+                """,
+                [
+                    (
+                        run_id,
+                        1,
+                        "2026-07-29T00:00:00+00:00",
+                        "missing safety",
+                        "answer",
+                        "completed",
+                        "{}",
+                    ),
+                    (
+                        run_id,
+                        2,
+                        "2026-07-29T00:00:01+00:00",
+                        "verified safety",
+                        "answer",
+                        "completed",
+                        json.dumps(valid_step_outputs),
+                    ),
+                ],
+            )
+
+        ExperimentReporter(
+            db_path=str(self.db_path),
+            xlsx_path=str(self.xlsx_path),
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    benchmark_pass,
+                    benchmark_release_pass,
+                    final_safety_policy_pass,
+                    benchmark_failure_reasons
+                FROM interactions
+                ORDER BY question_number
+                """
+            ).fetchall()
+
+        self.assertEqual(rows[0][:3], (0, 0, None))
+        self.assertIn(
+            "safety_policy_not_evaluated",
+            json.loads(rows[0][3]),
+        )
+        self.assertEqual(rows[1][:3], (1, 1, 1))
+        self.assertEqual(json.loads(rows[1][3]), [])
 
 
 if __name__ == "__main__":

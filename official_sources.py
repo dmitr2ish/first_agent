@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urldefrag, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import requests
 import trafilatura
@@ -28,6 +30,15 @@ ALLOWED_DOMAINS = (
 DEFAULT_MAX_PAGES = 5
 MAX_DOWNLOAD_BYTES = 8_000_000
 MAX_TEXT_CHARS_PER_SOURCE = 7_000
+MAX_QUERY_CHARS = 500
+MAX_REDIRECTS = 5
+
+HTML_CONTENT_TYPES = {
+    "",
+    "application/xhtml+xml",
+    "text/html",
+    "text/plain",
+}
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -44,12 +55,42 @@ REQUEST_HEADERS = {
 def _is_allowed_url(url: str) -> bool:
     """Проверяет протокол и домен URL."""
 
+    if not isinstance(url, str) or not url:
+        return False
+
+    normalized_url = unicodedata.normalize("NFKC", url)
+
+    # Do not silently reinterpret visually confusable or control-bearing
+    # URLs. The exact value is later emitted in the trusted source appendix.
+    if normalized_url != url:
+        return False
+
+    if (
+        "\\" in url
+        or any(
+            character.isspace()
+            or unicodedata.category(character) in {"Cc", "Cf"}
+            for character in url
+        )
+        or any(character in url for character in '<>"`')
+    ):
+        return False
+
     try:
         parsed = urlparse(url)
+        port = parsed.port
     except ValueError:
         return False
 
-    if parsed.scheme not in {"http", "https"}:
+    if parsed.scheme.casefold() != "https":
+        return False
+
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or port not in {None, 443}
+    ):
         return False
 
     hostname = (parsed.hostname or "").lower().rstrip(".")
@@ -129,72 +170,124 @@ def _download_document(url: str) -> dict[str, Any]:
     if not _is_allowed_url(url):
         raise ValueError(f"Domain is not allowed: {url}")
 
-    with requests.get(
-        url,
-        headers=REQUEST_HEADERS,
-        timeout=(7, 25),
-        allow_redirects=True,
-        stream=True,
-    ) as response:
-        response.raise_for_status()
+    current_url = url
 
-        final_url = urldefrag(response.url).url
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        with requests.get(
+            current_url,
+            headers=REQUEST_HEADERS,
+            timeout=(7, 25),
+            allow_redirects=False,
+            stream=True,
+        ) as response:
+            status_code = int(getattr(response, "status_code", 200))
 
-        # Обязательно повторно проверяем URL после redirect
-        if not _is_allowed_url(final_url):
-            raise ValueError(
-                f"Redirected to a non-allowed domain: {final_url}"
-            )
+            if status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError(
+                        "Redirect response did not include Location."
+                    )
+                if redirect_count >= MAX_REDIRECTS:
+                    raise ValueError("Too many redirects.")
 
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > MAX_DOWNLOAD_BYTES:
-            raise ValueError(
-                f"Document is too large: {content_length} bytes"
-            )
+                next_url = urldefrag(
+                    urljoin(
+                        str(getattr(response, "url", current_url)),
+                        location,
+                    )
+                ).url
+                if not _is_allowed_url(next_url):
+                    raise ValueError(
+                        "Redirected to a non-allowed domain: "
+                        f"{next_url}"
+                    )
 
-        chunks: list[bytes] = []
-        downloaded_size = 0
-
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            if not chunk:
+                current_url = next_url
                 continue
 
-            downloaded_size += len(chunk)
+            response.raise_for_status()
+            final_url = urldefrag(
+                str(getattr(response, "url", current_url))
+            ).url
 
-            if downloaded_size > MAX_DOWNLOAD_BYTES:
+            # A custom transport/mock can still report a different final URL.
+            if not _is_allowed_url(final_url):
                 raise ValueError(
-                    f"Document exceeded {MAX_DOWNLOAD_BYTES} bytes"
+                    f"Redirected to a non-allowed domain: {final_url}"
                 )
 
-            chunks.append(chunk)
+            content_length = response.headers.get("Content-Length")
+            if (
+                content_length
+                and int(content_length) > MAX_DOWNLOAD_BYTES
+            ):
+                raise ValueError(
+                    f"Document is too large: {content_length} bytes"
+                )
 
-        raw_content = b"".join(chunks)
-        content_type = (
-            response.headers.get("Content-Type", "")
-            .split(";")[0]
-            .strip()
-            .lower()
-        )
+            chunks: list[bytes] = []
+            downloaded_size = 0
 
-        if (
-            content_type == "application/pdf"
-            or final_url.lower().endswith(".pdf")
-        ):
-            text = _extract_pdf(raw_content)
-            document_type = "pdf"
-        else:
-            text = _extract_html(raw_content, response.encoding)
-            document_type = "html"
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
 
-        if not text:
-            raise ValueError("No readable text was extracted")
+                downloaded_size += len(chunk)
 
-        return {
-            "final_url": final_url,
-            "document_type": document_type,
-            "content_type": content_type,
-            "text": text[:MAX_TEXT_CHARS_PER_SOURCE],
-        }
+                if downloaded_size > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(
+                        f"Document exceeded {MAX_DOWNLOAD_BYTES} bytes"
+                    )
+
+                chunks.append(chunk)
+
+            raw_content = b"".join(chunks)
+            content_type = (
+                response.headers.get("Content-Type", "")
+                .split(";")[0]
+                .strip()
+                .lower()
+            )
+
+            is_pdf = (
+                content_type == "application/pdf"
+                or final_url.lower().endswith(".pdf")
+            )
+
+            if is_pdf:
+                text = _extract_pdf(raw_content)
+                document_type = "pdf"
+            else:
+                if content_type not in HTML_CONTENT_TYPES:
+                    raise ValueError(
+                        "Unsupported document content type: "
+                        f"{content_type or '<missing>'}"
+                    )
+
+                text = _extract_html(raw_content, response.encoding)
+                document_type = "html"
+
+            if not text:
+                raise ValueError("No readable text was extracted")
+
+            extracted_text = text[:MAX_TEXT_CHARS_PER_SOURCE]
+
+            return {
+                "final_url": final_url,
+                "document_type": document_type,
+                "content_type": content_type,
+                "text": extracted_text,
+                # content_sha256 binds the exact text consumed by the agents.
+                "content_sha256": hashlib.sha256(
+                    extracted_text.encode("utf-8")
+                ).hexdigest(),
+                "raw_content_sha256": hashlib.sha256(
+                    raw_content
+                ).hexdigest(),
+            }
+
+    raise ValueError("Too many redirects.")
 
 
 def _search_candidates(query: str) -> list[dict[str, str]]:
@@ -212,42 +305,59 @@ def _search_candidates(query: str) -> list[dict[str, str]]:
 
     candidates: list[dict[str, str]] = []
     seen_urls: set[str] = set()
+    search_errors: list[str] = []
 
     with DDGS() as ddgs:
         for search_query in search_queries:
-            results = ddgs.text(search_query, max_results=8)
+            try:
+                results = ddgs.text(search_query, max_results=8)
 
-            for result in results:
-                url = (
-                    result.get("href")
-                    or result.get("url")
-                    or ""
+                for result in results:
+                    if not isinstance(result, dict):
+                        continue
+
+                    url = (
+                        result.get("href")
+                        or result.get("url")
+                        or ""
+                    )
+
+                    normalized_url = urldefrag(url).url
+
+                    if not normalized_url:
+                        continue
+
+                    if not _is_allowed_url(normalized_url):
+                        continue
+
+                    if normalized_url in seen_urls:
+                        continue
+
+                    seen_urls.add(normalized_url)
+
+                    candidates.append(
+                        {
+                            "title": str(
+                                result.get("title") or ""
+                            ).strip(),
+                            "url": normalized_url,
+                            "snippet": str(
+                                result.get("body")
+                                or result.get("snippet")
+                                or ""
+                            ).strip(),
+                        }
+                    )
+            except Exception as error:
+                search_errors.append(
+                    f"{search_query}: {error}"
                 )
 
-                normalized_url = urldefrag(url).url
-
-                if not normalized_url:
-                    continue
-
-                if not _is_allowed_url(normalized_url):
-                    continue
-
-                if normalized_url in seen_urls:
-                    continue
-
-                seen_urls.add(normalized_url)
-
-                candidates.append(
-                    {
-                        "title": result.get("title", ""),
-                        "url": normalized_url,
-                        "snippet": (
-                            result.get("body")
-                            or result.get("snippet")
-                            or ""
-                        ),
-                    }
-                )
+    if not candidates and search_errors:
+        raise RuntimeError(
+            "All official-source searches failed: "
+            + " | ".join(search_errors)
+        )
 
     return candidates
 
@@ -263,10 +373,15 @@ def collect_official_sources_data(
     решить «не использовать инструмент».
     """
 
-    clean_query = query.strip()
+    clean_query = " ".join(query.split())
 
     if not clean_query:
         raise ValueError("Query cannot be empty")
+
+    if len(clean_query) > MAX_QUERY_CHARS:
+        raise ValueError(
+            f"Query exceeds {MAX_QUERY_CHARS} characters"
+        )
 
     max_pages = max(1, min(max_pages, 5))
 
@@ -293,6 +408,11 @@ def collect_official_sources_data(
                     "url": document["final_url"],
                     "search_snippet": candidate["snippet"],
                     "document_type": document["document_type"],
+                    "content_type": document["content_type"],
+                    "content_sha256": document["content_sha256"],
+                    "raw_content_sha256": document[
+                        "raw_content_sha256"
+                    ],
                     "content": document["text"],
                 }
             )
@@ -305,6 +425,23 @@ def collect_official_sources_data(
                 }
             )
 
+    digest_payload = [
+        {
+            "source_id": source["source_id"],
+            "url": source["url"],
+            "content_sha256": source["content_sha256"],
+        }
+        for source in sources
+    ]
+    evidence_package_digest = hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
     return {
         "query": clean_query,
         "collected_at_utc": datetime.now(
@@ -312,6 +449,7 @@ def collect_official_sources_data(
         ).isoformat(),
         "allowed_domains": list(ALLOWED_DOMAINS),
         "source_count": len(sources),
+        "evidence_package_digest": evidence_package_digest,
         "sources": sources,
         "errors": errors,
     }

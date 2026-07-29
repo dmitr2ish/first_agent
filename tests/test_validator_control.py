@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from visa_workflow import (
+    CitationEvidenceMismatchError,
     ValidatorEvidenceRequiredError,
     ValidatorOutputPolicyError,
     build_validator_step_output,
@@ -18,10 +19,20 @@ def tool(
         result: object,
         *,
         error: bool = False,
+        arguments: dict[str, object] | None = None,
 ) -> SimpleNamespace:
+    if arguments is None:
+        arguments = {}
+
+        if name == "read_official_source" and isinstance(result, dict):
+            source_id = result.get("source_id")
+
+            if source_id:
+                arguments["source_id"] = source_id
+
     return SimpleNamespace(
         tool_name=name,
-        tool_args={},
+        tool_args=arguments,
         tool_call_error=error,
         result=(
             result
@@ -268,11 +279,8 @@ class ValidatorControlTests(unittest.TestCase):
             step_output.content,
             "The report did not provide verifiable source citations.",
         )
-        self.assertIn('"has_citations": false', validator.calls[0][0])
-        self.assertIn(
-            '"The report did not provide verifiable source citations."',
-            validator.calls[0][0],
-        )
+        self.assertEqual(result.attempt_count, 0)
+        self.assertEqual(validator.calls, [])
 
     def test_invalid_source_id_in_corrected_report_is_rejected(self) -> None:
         original = "Invented claim [S99]."
@@ -304,6 +312,21 @@ class ValidatorControlTests(unittest.TestCase):
 
         self.assertFalse(output_check.passed)
         self.assertEqual(output_check.new_source_ids, ("S2",))
+
+    def test_existing_source_id_must_keep_bracket_citation_syntax(
+        self,
+    ) -> None:
+        output_check = check_validator_output(
+            "First [S1]. Second [S2].",
+            "First S1. Second [S2].",
+            self.source_package,
+        )
+
+        self.assertFalse(output_check.passed)
+        self.assertEqual(
+            output_check.unbracketed_source_ids,
+            ("S1",),
+        )
 
     def test_new_url_is_rejected(self) -> None:
         output_check = check_validator_output(
@@ -344,6 +367,57 @@ class ValidatorControlTests(unittest.TestCase):
             build_validator_step_output(
                 result,
                 "Original [S1].",
+                self.source_package,
+            )
+
+    def test_validator_cannot_drop_every_bracket_citation(self) -> None:
+        validator = SequenceValidator(
+            response(
+                "Corrected factual report without a citation.",
+                tool(
+                    "read_official_source",
+                    {"source_id": "S1", "content": "official evidence"},
+                ),
+            )
+        )
+        result = run_validator_with_tool_control(
+            validator,
+            self.source_package_json,
+            self.original_report,
+            self.citation_json,
+        )
+
+        with self.assertRaises(ValidatorOutputPolicyError):
+            build_validator_step_output(
+                result,
+                self.original_report,
+                self.source_package,
+            )
+
+    def test_validator_cannot_cite_source_it_did_not_read(self) -> None:
+        validator = SequenceValidator(
+            response(
+                "Corrected report [S1].",
+                tool(
+                    "read_official_source",
+                    {"source_id": "S2", "content": "different evidence"},
+                ),
+            )
+        )
+        result = run_validator_with_tool_control(
+            validator,
+            self.source_package_json,
+            self.original_report,
+            self.citation_json,
+        )
+
+        with self.assertRaisesRegex(
+            CitationEvidenceMismatchError,
+            "S1",
+        ):
+            build_validator_step_output(
+                result,
+                self.original_report,
                 self.source_package,
             )
 

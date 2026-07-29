@@ -4,14 +4,30 @@ import argparse
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+import sys
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 import official_sources
 from agno.workflow.workflow import Workflow
 
+from benchmark_evaluator import (
+    evaluate_semantic_expectations,
+    validate_expectations_schema,
+)
+from benchmark_evidence import (
+    BenchmarkEvidenceCache,
+    EvidenceCacheError,
+    EvidenceTurn,
+)
 from experiment_reporter import ExperimentConfig, ExperimentReporter
+from ollama_runtime import (
+    DEFAULT_OLLAMA_URL,
+    OllamaPreflightError,
+    preflight_ollama_model,
+)
 from project_config import (
     BENCHMARK_SCHEMA_VERSION,
     MAX_SOURCE_PAGES,
@@ -24,7 +40,10 @@ from project_config import (
     get_component_versions,
     get_git_commit,
 )
-from visa_workflow import init_visa_workflow
+from visa_workflow import (
+    init_visa_workflow,
+    workflow_response_succeeded,
+)
 
 
 DEFAULT_QUESTIONS_FILE = Path(__file__).with_name(
@@ -42,6 +61,7 @@ class BenchmarkTurn:
 
     turn_id: str
     prompt: str
+    expectations: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,6 +85,28 @@ class BenchmarkConfig:
     @property
     def question_count(self) -> int:
         return sum(len(scenario.turns) for scenario in self.scenarios)
+
+
+@dataclass(frozen=True)
+class BenchmarkExecutionSummary:
+    """Lifecycle result used to produce a meaningful process exit code."""
+
+    attempted: int
+    workflow_completed: int
+    workflow_failed: int
+    release_passed: int
+    release_failed: int
+
+
+def benchmark_exit_code(summary: BenchmarkExecutionSummary) -> int:
+    """Fail automation when any interaction misses workflow/release gates."""
+
+    return int(
+        summary.workflow_failed > 0
+        or summary.release_failed > 0
+        or summary.workflow_completed != summary.attempted
+        or summary.release_passed != summary.attempted
+    )
 
 
 def _require_non_empty_string(
@@ -200,6 +242,13 @@ def load_benchmark_config(path: str | Path) -> BenchmarkConfig:
                             f"turn {turn_index} prompt"
                         ),
                     ),
+                    expectations=validate_expectations_schema(
+                        raw_turn.get("expectations"),
+                        field_name=(
+                            f"scenario {scenario_id} "
+                            f"turn {turn_index} expectations"
+                        ),
+                    ),
                 )
             )
 
@@ -230,13 +279,38 @@ def load_questions(path: str | Path) -> list[str]:
     ]
 
 
+def build_run_namespace_token(run_namespace: str) -> str:
+    """Normalize a namespace without losing uniqueness when it is shortened."""
+
+    namespace_slug = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        run_namespace.casefold(),
+    ).strip("-")
+
+    if not namespace_slug:
+        raise ValueError(
+            "run_namespace must contain letters or digits."
+        )
+
+    namespace_token = namespace_slug
+    if len(namespace_slug) > 24:
+        namespace_token = (
+            f"{namespace_slug[:24]}-"
+            f"{hashlib.sha256(namespace_slug.encode('utf-8')).hexdigest()[:12]}"
+        )
+
+    return namespace_token
+
+
 def build_scenario_session_id(
     *,
+    run_namespace: str,
     experiment_run_id: int,
     scenario_number: int,
     scenario_id: str,
 ) -> str:
-    """Build one deterministic, run-scoped session ID per scenario."""
+    """Build a globally isolated session ID for one benchmark invocation."""
 
     slug = re.sub(
         r"[^a-z0-9]+",
@@ -247,8 +321,11 @@ def build_scenario_session_id(
     if not slug:
         raise ValueError("scenario_id must contain letters or digits.")
 
+    namespace_token = build_run_namespace_token(run_namespace)
+
     return (
-        f"benchmark-{experiment_run_id}-"
+        f"benchmark-{namespace_token}-"
+        f"{experiment_run_id}-"
         f"{scenario_number:02d}-{slug}"
     )
 
@@ -267,70 +344,209 @@ def _benchmark_context(
     }
 
 
+def _evidence_turn(
+    scenario: BenchmarkScenario,
+    turn: BenchmarkTurn,
+) -> EvidenceTurn:
+    return EvidenceTurn.from_prompt(
+        scenario_id=scenario.scenario_id,
+        turn_id=turn.turn_id,
+        prompt=turn.prompt,
+    )
+
+
+def _expected_evidence_turns(
+    config: BenchmarkConfig,
+) -> tuple[EvidenceTurn, ...]:
+    return tuple(
+        _evidence_turn(scenario, turn)
+        for scenario in config.scenarios
+        for turn in scenario.turns
+    )
+
+
+def build_evidence_cache(
+    *,
+    mode: str,
+    path: str | Path | None,
+    config: BenchmarkConfig,
+    source_collector_version: str = SOURCE_COLLECTOR_VERSION,
+    workflow_version: str = WORKFLOW_VERSION,
+) -> BenchmarkEvidenceCache | None:
+    """Validate CLI/API evidence settings and prepare record or replay."""
+
+    if mode == "live":
+        if path is not None:
+            raise EvidenceCacheError(
+                "--evidence-cache requires --evidence-mode record or replay."
+            )
+        return None
+
+    if mode not in {"record", "replay"}:
+        raise EvidenceCacheError(
+            f"Unsupported evidence mode: {mode}"
+        )
+    if path is None or not str(path).strip():
+        raise EvidenceCacheError(
+            f"--evidence-cache is required in {mode} mode."
+        )
+
+    return BenchmarkEvidenceCache(
+        mode=mode,
+        path=path,
+        benchmark_version=config.version,
+        benchmark_digest=config.digest,
+        source_collector_version=source_collector_version,
+        workflow_version=workflow_version,
+        expected_turns=_expected_evidence_turns(config),
+    )
+
+
 def run_benchmark(
     *,
     workflow: Workflow,
     reporter: ExperimentReporter,
     experiment_run_id: int,
     config: BenchmarkConfig,
-) -> None:
+    run_namespace: str,
+    evidence_cache: BenchmarkEvidenceCache | None = None,
+) -> BenchmarkExecutionSummary:
     """Run isolated scenarios and preserve history only within follow-ups."""
 
     question_number = 0
+    workflow_completed = 0
+    workflow_failed = 0
+    release_passed = 0
+    release_failed = 0
 
-    for scenario_number, scenario in enumerate(
-        config.scenarios,
-        start=1,
-    ):
-        session_id = build_scenario_session_id(
-            experiment_run_id=experiment_run_id,
-            scenario_number=scenario_number,
-            scenario_id=scenario.scenario_id,
-        )
-
-        for turn_number, turn in enumerate(scenario.turns, start=1):
-            question_number += 1
-            context = _benchmark_context(
-                scenario,
-                turn,
-                turn_number=turn_number,
-            )
-            print(
-                f"\n[Benchmark {question_number}/"
-                f"{config.question_count}] "
-                f"{scenario.scenario_id}/{turn.turn_id}: "
-                f"{turn.prompt}"
+    try:
+        for scenario_number, scenario in enumerate(
+            config.scenarios,
+            start=1,
+        ):
+            session_id = build_scenario_session_id(
+                run_namespace=run_namespace,
+                experiment_run_id=experiment_run_id,
+                scenario_number=scenario_number,
+                scenario_id=scenario.scenario_id,
             )
 
-            try:
-                response = workflow.run(
-                    input=turn.prompt,
-                    session_id=session_id,
-                    additional_data={
-                        "experiment_run_id": experiment_run_id,
-                        "benchmark_version": config.version,
-                        **context,
-                    },
-                    stream=False,
+            for turn_number, turn in enumerate(
+                scenario.turns,
+                start=1,
+            ):
+                question_number += 1
+                evidence_turn = _evidence_turn(scenario, turn)
+                context = _benchmark_context(
+                    scenario,
+                    turn,
+                    turn_number=turn_number,
+                )
+                print(
+                    f"\n[Benchmark {question_number}/"
+                    f"{config.question_count}] "
+                    f"{scenario.scenario_id}/{turn.turn_id}: "
+                    f"{turn.prompt}"
                 )
 
-                reporter.record_workflow_result(
+                additional_data = {
+                    "experiment_run_id": experiment_run_id,
+                    "benchmark_version": config.version,
+                    "benchmark_run_namespace": run_namespace,
+                    **context,
+                }
+                if (
+                    evidence_cache is not None
+                    and evidence_cache.mode == "replay"
+                ):
+                    additional_data["source_package_override"] = (
+                        evidence_cache.source_package_for(
+                            turn=evidence_turn
+                        )
+                    )
+
+                try:
+                    response = workflow.run(
+                        input=turn.prompt,
+                        session_id=session_id,
+                        additional_data=additional_data,
+                        stream=False,
+                    )
+
+                except Exception as error:
+                    workflow_failed += 1
+                    release_failed += 1
+                    reporter.record_failure(
+                        experiment_run_id=experiment_run_id,
+                        question=turn.prompt,
+                        error=error,
+                        session_id=session_id,
+                        benchmark_context=context,
+                    )
+                    continue
+
+                if (
+                    evidence_cache is not None
+                    and evidence_cache.mode == "record"
+                ):
+                    evidence_cache.record_response(
+                        turn=evidence_turn,
+                        workflow_response=response,
+                    )
+
+                semantic_evaluation = evaluate_semantic_expectations(
+                    str(getattr(response, "content", "") or ""),
+                    turn.expectations,
+                )
+                semantic_expectations_present = bool(
+                    turn.expectations.get("required_pattern_groups")
+                    or turn.expectations.get("forbidden_patterns")
+                )
+                context = {
+                    **context,
+                    "semantic_pass": (
+                        semantic_evaluation.passed
+                        if semantic_expectations_present
+                        else None
+                    ),
+                    "semantic_failure_reasons": list(
+                        semantic_evaluation.failure_reasons
+                    ),
+                }
+
+                # Keep reporting failures distinct from Workflow failures.
+                # If export/storage fails after an insert, do not create a
+                # duplicate "workflow_failed" interaction for the same turn.
+                release_pass = reporter.record_workflow_result(
                     experiment_run_id=experiment_run_id,
                     question=turn.prompt,
                     workflow_response=response,
                     benchmark_context=context,
                 )
+                if release_pass is True:
+                    release_passed += 1
+                else:
+                    # Release automation is fail-closed: a missing/unknown
+                    # reporter result is not evidence that all gates passed.
+                    release_failed += 1
+                if workflow_response_succeeded(response):
+                    workflow_completed += 1
+                else:
+                    workflow_failed += 1
 
-            except Exception as error:
-                reporter.record_failure(
-                    experiment_run_id=experiment_run_id,
-                    question=turn.prompt,
-                    error=error,
-                    session_id=session_id,
-                    benchmark_context=context,
-                )
+        if evidence_cache is not None:
+            evidence_cache.finalize()
 
-    reporter.finish_run(experiment_run_id)
+    finally:
+        reporter.finish_run(experiment_run_id)
+
+    return BenchmarkExecutionSummary(
+        attempted=question_number,
+        workflow_completed=workflow_completed,
+        workflow_failed=workflow_failed,
+        release_passed=release_passed,
+        release_failed=release_failed,
+    )
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -357,13 +573,114 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=REPORT_XLSX_FILE,
         help="Generated XLSX report path.",
     )
+    parser.add_argument(
+        "--workflow-db",
+        help=(
+            "Agno history database. By default a namespace-specific DB is "
+            "created next to --db."
+        ),
+    )
+    parser.add_argument(
+        "--run-namespace",
+        help=(
+            "Explicit unique namespace for scenario sessions. A UUID is used "
+            "when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--ollama-url",
+        default=DEFAULT_OLLAMA_URL,
+        help="Ollama API base URL.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable verbose Agno/model logs. These logs may contain raw "
+            "prompts, evidence, and unsafe model output."
+        ),
+    )
+    parser.add_argument(
+        "--evidence-mode",
+        choices=("live", "record", "replay"),
+        default="live",
+        help=(
+            "Use live retrieval, record exact source packages, or replay "
+            "a frozen evidence cache."
+        ),
+    )
+    parser.add_argument(
+        "--evidence-cache",
+        help=(
+            "JSON evidence manifest path; required for record and replay."
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
     config = load_benchmark_config(args.questions)
+    run_namespace = (
+        str(args.run_namespace).strip()
+        if args.run_namespace
+        else uuid.uuid4().hex
+    )
 
+    if (
+        args.evidence_mode == "live"
+        and args.evidence_cache is not None
+    ) or (
+        args.evidence_mode != "live"
+        and not args.evidence_cache
+    ):
+        print(
+            "[Benchmark] Invalid evidence settings: "
+            "--evidence-cache is required only for record/replay mode.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        model_metadata = preflight_ollama_model(
+            args.model,
+            base_url=args.ollama_url,
+            require_tools=True,
+        )
+    except OllamaPreflightError as error:
+        print(f"[Benchmark] Preflight failed: {error}", file=sys.stderr)
+        return 2
+
+    try:
+        evidence_cache = build_evidence_cache(
+            mode=args.evidence_mode,
+            path=args.evidence_cache,
+            config=config,
+        )
+    except EvidenceCacheError as error:
+        print(
+            f"[Benchmark] Evidence cache error: {error}",
+            file=sys.stderr,
+        )
+        return 2
+
+    report_db_path = Path(args.db)
+    workflow_db_path = (
+        Path(args.workflow_db)
+        if args.workflow_db
+        else report_db_path.parent
+        / (
+            "workflow_sessions_"
+            f"{build_run_namespace_token(run_namespace)}.db"
+        )
+    )
+
+    workflow = init_visa_workflow(
+        model_name=args.model,
+        db_file=str(workflow_db_path),
+        debug_mode=args.debug,
+        ollama_host=args.ollama_url,
+    )
     reporter = ExperimentReporter(
         db_path=args.db,
         xlsx_path=args.xlsx,
@@ -380,28 +697,85 @@ def main(argv: Sequence[str] | None = None) -> int:
             git_commit=get_git_commit(),
             notes=(
                 f"Benchmark: {Path(args.questions).name}; "
-                f"{config.question_count} questions"
+                f"{config.question_count} questions; "
+                f"session namespace: {run_namespace}; "
+                f"workflow db: {workflow_db_path}; "
+                f"evidence mode: {args.evidence_mode}; "
+                f"evidence cache: {args.evidence_cache or 'none'}"
             ),
             benchmark_version=(
                 f"{BENCHMARK_SCHEMA_VERSION}:{config.version}"
             ),
             benchmark_config_digest=config.digest,
-            component_versions=get_component_versions(),
+            component_versions={
+                **get_component_versions(),
+                **model_metadata.as_component_versions(),
+                "benchmark_session_namespace": run_namespace,
+                "benchmark_evidence_mode": args.evidence_mode,
+            },
         )
     )
-    workflow = init_visa_workflow(model_name=args.model)
 
-    run_benchmark(
-        workflow=workflow,
-        reporter=reporter,
-        experiment_run_id=experiment_run_id,
-        config=config,
-    )
+    try:
+        summary = run_benchmark(
+            workflow=workflow,
+            reporter=reporter,
+            experiment_run_id=experiment_run_id,
+            config=config,
+            run_namespace=run_namespace,
+            evidence_cache=evidence_cache,
+        )
+    except EvidenceCacheError as error:
+        print(
+            f"[Benchmark] Evidence cache error: {error}",
+            file=sys.stderr,
+        )
+        return 2
 
+    if evidence_cache is not None:
+        reporter.update_run_component_versions(
+            experiment_run_id,
+            {
+                "benchmark_evidence_manifest_sha256": (
+                    evidence_cache.manifest_sha256
+                ),
+            },
+        )
+
+    xlsx_export_error = reporter.last_export_error
+    if xlsx_export_error:
+        print(
+            "\n[Benchmark] SQLite сохранён, но XLSX export failed: "
+            f"{xlsx_export_error}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "\n[Benchmark] Результаты сохранены в "
+            f"{args.xlsx}"
+        )
     print(
-        "\n[Benchmark] Результаты сохранены в "
-        f"{args.xlsx}"
+        "[Benchmark] Workflow completed: "
+        f"{summary.workflow_completed}/{summary.attempted}"
     )
+    print(
+        "[Benchmark] Release checks passed: "
+        f"{summary.release_passed}/{summary.attempted}"
+    )
+    if evidence_cache is not None:
+        print(
+            "[Benchmark] Evidence manifest SHA-256: "
+            f"{evidence_cache.manifest_sha256}"
+        )
+
+    exit_code = benchmark_exit_code(summary)
+    if exit_code or xlsx_export_error:
+        print(
+            "[Benchmark] Есть workflow, release или artifact failures.",
+            file=sys.stderr,
+        )
+        return exit_code or 1
+
     return 0
 
 

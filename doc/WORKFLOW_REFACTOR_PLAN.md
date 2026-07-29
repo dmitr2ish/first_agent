@@ -1,16 +1,22 @@
 # План рефакторинга Visa Research Workflow
 
-Обновлено: 22 июля 2026 года.
+Обновлено: 29 июля 2026 года.
+
+**Текущий статус:** этапы 1–7 завершены в исходном scope; этап 8
+переоткрыт после сквозного release-review и имеет статус `[~]`.
 
 ## Цель
 
-Довести реализацию research-агента на Agno Workflow до состояния, пригодного для сдачи второй части задания:
+Довести реализацию research-агента на Agno Workflow до воспроизводимого,
+безопасного и проверяемого release candidate:
 
 - обязательный поиск и загрузка официальных источников выполняются Python-кодом;
 - Researcher и Validator используют настоящие Agno tool calls для работы с загруженными источниками;
 - каждый вызов инструмента виден в stdout и сохраняется в результатах benchmark;
 - результаты benchmark сохраняются в SQLite и экспортируются в табличный XLSX-отчёт;
 - каждый этап считается завершённым только после тестирования и проверки его критериев готовности.
+- финальный пользовательский ответ, а не только промежуточный Researcher
+  report, проходит citation, grounding и safety policy.
 
 ## Границы проекта
 
@@ -20,6 +26,12 @@
 - сохранение итогового ответа в Markdown — для сдачи достаточно benchmark-отчётов в таблицах;
 - расширение обработки ошибок интерактивного CLI, не связанное с Workflow, tools или benchmark;
 - замена обязательного Python retrieval на добровольный вызов инструмента моделью.
+
+После итогового review 29 июля scope этапа 8 расширен нормальными
+release-hardening задачами: CLI/session lifecycle, финальные policy gates,
+защита XLSX, privacy-safe debug, dependency manifest и offline CI. Это не
+меняет архитектуру фаз 1–7, но блокирует утверждение о готовности к релизу до
+повторной проверки.
 
 ## Статусы
 
@@ -476,19 +488,74 @@ interaction прошёл пять технических условий. Поэ�
 качество требуют отдельной оценки. Подробности сохранены в
 [`doc/phase_7_report.md`](phase_7_report.md).
 
+**Уточнение итогового review:** phase 7 доказала изоляцию сценариев внутри
+одного experiment run, но session ID включал локальный integer ID reporting
+DB. Новая reporting DB могла снова выдать `run_id=1` и столкнуться со старой
+Agno history. Межпусковая глобальная изоляция перенесена в обязательный
+rework этапа 8.
+
 ## Этап 8. Финальная проверка и материалы для сдачи
 
-- [ ] Запустить полный набор автоматических тестов.
-- [ ] Выполнить benchmark на выбранных моделях с одинаковой конфигурацией.
-- [ ] Проверить итоговый XLSX вручную.
-- [ ] Проверить отсутствие выдуманных source IDs в успешных запусках.
-- [ ] Проверить наличие реальных tool calls в каждом успешном research-запуске.
-- [ ] Подготовить скриншот stdout с `tool_call` и `tool_result`.
-- [ ] Подготовить benchmark-таблицу для демонстрации.
-- [ ] Обновить описание архитектуры фактическими schemas инструментов.
-- [ ] Описать, как Agno контролирует tool-calling loop.
-- [ ] Описать роль системных prompts каждого агента.
-- [ ] Зафиксировать известные ограничения локальных моделей и официальных сайтов.
+- [x] Запустить первичный полный набор автоматических тестов.
+- [~] Выполнить benchmark на выбранных моделях с одинаковой конфигурацией:
+  первичный запуск выполнен, но одна модель получила старую Agno history.
+- [x] Проверить первичный XLSX вручную.
+- [~] Проверить отсутствие выдуманных source IDs в финальных ответах:
+  исходная проверка измеряла промежуточный Researcher report.
+- [x] Проверить наличие реальных tool calls в каждом успешном research-запуске.
+- [x] Подготовить скриншот stdout с `tool_call` и `tool_result`.
+- [x] Подготовить benchmark-таблицу для демонстрации.
+- [x] Обновить описание архитектуры фактическими schemas инструментов.
+- [x] Описать, как Agno контролирует tool-calling loop.
+- [x] Описать роль системных prompts каждого агента.
+- [x] Зафиксировать известные ограничения локальных моделей и официальных сайтов.
+
+### Release hardening
+
+- [x] Создавать уникальный session namespace для каждого CLI process,
+  `/new_run` и `/change_model`.
+- [x] Создавать уникальный namespace каждого benchmark invocation и
+  изолировать его workflow-history DB.
+- [x] Добавить model/tool capability preflight и корректный CLI lifecycle.
+- [x] Повторно проверять citations и source IDs после Validator.
+- [x] Требовать явный успех Researcher и Validator для technical pass.
+- [x] Проверять финальный body после Manager: непустой текст, citations,
+  допустимые IDs/URL и отсутствие восстановления fallback.
+- [x] Гарантировать локализованный legal disclaimer Python-кодом после
+  Manager и сохранять `legal_disclaimer_added` в telemetry.
+- [x] Отклонять unbracketed `S#` tokens после Validator и Manager.
+- [x] Связать каждый процитированный ID с фактически прочитанным evidence.
+- [x] Добавлять в финальную секцию только использованные проверенные источники.
+- [x] Санитизировать недоверенные source titles и Unicode URL variants.
+- [x] Выключить debug/tool trace по умолчанию; при явном `--debug`
+  предупреждать о query/evidence/research data, а Manager debug всегда
+  оставлять выключенным до final policy.
+- [x] Явно выключить внешнюю Agno telemetry (`telemetry=False`) у всех
+  Agents и Workflow, сохранив локальную SQLite/XLSX telemetry проекта.
+- [x] Задокументировать, что live/record retrieval отправляет query в DDGS,
+  раскрывает сетевые метаданные official sites и не должен содержать PII.
+- [x] Нейтрализовать formula prefixes во всех недоверенных XLSX-значениях.
+- [x] Разделить technical, semantic и release pass/failure reasons.
+- [x] Считать release pass только при явных `semantic_pass is True` и
+  `safety_policy_pass is True`; `None` обрабатывать fail-closed.
+- [x] Добавить semantic golden checks для false premise, insufficient
+  evidence, personal eligibility, citations и fraud refusal.
+- [x] Добавить atomic record/replay frozen evidence с проверкой benchmark,
+  prompt, package и manifest digests.
+- [x] Сохранять финальный evidence-manifest SHA-256 в
+  `component_versions` benchmark run после record finalize/replay validation.
+- [x] Возвращать ненулевой exit code при любом benchmark workflow/release
+  failure и гарантированно завершать run.
+- [x] Добавить корневой README, dependency manifest/lock и offline CI.
+- [x] Собрать каноническую документацию проекта.
+- [x] Запустить все тесты после hardening: 131 тест, `OK`; compile/import,
+  оба `--help`, `pip check` и `git diff --check` проходят.
+- [ ] Закоммитить изменения и получить чистый Git SHA.
+- [ ] Повторить multi-model benchmark на чистых reporting/history DB.
+- [ ] Проверить SQLite, все листы XLSX и финальные answers.
+- [ ] Обновить phase-8 итог только новыми валидными результатами.
+- [ ] Выбрать владельцем проекта и добавить LICENSE до публичного релиза.
+- [ ] Провести dependency/security review перед публичным релизом.
 
 ### Критерий готовности
 
@@ -499,19 +566,48 @@ interaction прошёл пять технических условий. Поэ�
 - Researcher выполняет фактическое чтение evidence через tools;
 - Validator проверяет evidence и citations;
 - benchmark результаты записываются в SQLite и XLSX;
-- успешные interactions соответствуют автоматическому критерию прохождения;
+- история разных runs и моделей не смешивается;
+- финальный user-facing body проходит citation, grounding и safety gates;
+- технический, семантический и release-результат не смешиваются;
+- успешные interactions соответствуют актуальному release-критерию;
 - подготовлены stdout-скриншот, таблица и описание архитектуры.
 
 ### Результат проверки
 
-Пока не выполнено.
+**Статус `[~]`, clean rerun pending.** Первичный snapshot 2026-07-29 содержит
+63 проходящих теста, 2 model runs, 22 interactions и 90 tool-call events.
+SQLite/XLSX агрегаты внутренне согласованы, материалы созданы.
+
+Сквозной review выявил, что Qwen sessions совпали с history из предыдущей
+Agno DB, а citation/pass metrics измеряли Researcher report до Validator и
+Manager. Debug также мог показать raw Manager output до safety post-check.
+Поэтому прежние `10/11` и `3/11` являются диагностическими значениями, а не
+валидным сравнением моделей или release evidence.
+
+Release-hardening код реализован: UUID sessions и отдельная history DB,
+Ollama preflight, post-Validator/final citation/evidence gates, debug opt-in,
+HTTPS-only collector, XLSX sanitization и раздельные
+technical/semantic/release metrics, frozen evidence record/replay. Финальный
+локальный suite содержит 131
+проходящих тестов; compile/import, dependency и diff checks успешны. Этап
+будет отмечен `[x]` только после hosted CI и повторного benchmark на чистом
+commit и полностью изолированной history. Подробности:
+[`doc/phase_8_report.md`](phase_8_report.md).
 
 ## Журнал выполнения
 
 | Дата | Этап | Изменение | Проверка | Результат |
 |---|---|---|---|---|
 | 2026-07-22 | 0 | Согласован и сохранён план рефакторинга | Проверено содержание и границы плана | Выполнено |
+| 2026-07-29 | 1–7 | Последовательная реализация tools, gates, структуры, reporting и benchmark | Phase reports и 60 тестов к завершению phase 7 | Выполнено в исходном scope |
+| 2026-07-29 | 8 | Первичный multi-model benchmark, safety hardening и материалы | 63 теста, SQLite/XLSX audit, stdout trace | Snapshot создан |
+| 2026-07-29 | 8 review | Сквозной аудит sessions, финального grounding, safety и release metadata | Обнаружены cross-run history и несовпадение pass с финальным body | Rework `[~]` |
+| 2026-07-29 | 8 hardening | Реализованы session/final/reporting/security/release fixes | 131 тест, compile/import/help, pip/diff checks | Локальная проверка пройдена |
 
 ## Следующий шаг
 
-Начать с этапа 1: подключить tools к Researcher, не меняя остальные шаги Workflow. После реализации выполнить unit-тесты инструментов и один интеграционный запуск с локальной Ollama-моделью. Только после успешных проверок отметить этап 1 выполненным.
+Зафиксировать чистый commit, дождаться hosted CI и затем повторить phase-8
+multi-model benchmark на новых изолированных БД. После
+SQLite/XLSX/semantic review обновить phase-8 итог. Публикация до этого не
+выполняется; перед публичным релизом владелец также должен выбрать LICENSE,
+после чего требуется dependency/security review.

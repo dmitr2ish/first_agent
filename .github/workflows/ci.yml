@@ -1,0 +1,54 @@
+name: Python CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install locked dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.lock
+
+      - name: Verify dependency consistency
+        run: python -m pip check
+
+      - name: Compile active modules
+        run: >-
+          python -m compileall -q
+          benchmark_evaluator.py
+          benchmark_evidence.py
+          benchmark_runner.py
+          experiment_reporter.py
+          official_sources.py
+          ollama_runtime.py
+          project_config.py
+          source_analysis_tools.py
+          visa_cli.py
+          visa_workflow.py
+          tests
+
+      - name: Verify imports without Ollama
+        run: >-
+          python -c
+          "import benchmark_evaluator, benchmark_evidence, benchmark_runner,
+          experiment_reporter, official_sources, ollama_runtime,
+          project_config, source_analysis_tools, visa_cli, visa_workflow"
+
+      - name: Run offline unit tests
+        run: python -m unittest discover -s tests -v

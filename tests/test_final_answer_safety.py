@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from visa_workflow import (
+from visa_research.workflow import (
     assess_final_answer_safety,
     enforce_final_answer_safety,
 )

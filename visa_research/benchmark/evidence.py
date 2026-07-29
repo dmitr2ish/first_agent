@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from visa_workflow import (
+from visa_research.workflow import (
     SourcePackageOverrideError,
     validate_source_package_override,
 )

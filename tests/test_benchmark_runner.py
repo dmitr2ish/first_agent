@@ -11,8 +11,8 @@ from unittest.mock import Mock
 from agno.metrics import RunMetrics
 from agno.workflow.step import StepOutput
 
-import benchmark_runner
-from experiment_reporter import ExperimentConfig, ExperimentReporter
+from visa_research.benchmark import runner as benchmark_runner
+from visa_research.reporting import ExperimentConfig, ExperimentReporter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -142,10 +142,10 @@ class CapturingWorkflow:
 class BenchmarkRunnerTests(unittest.TestCase):
     def test_loads_versioned_benchmark_configuration(self) -> None:
         config = benchmark_runner.load_benchmark_config(
-            PROJECT_ROOT / "benchmark_questions.json"
+            PROJECT_ROOT / "resources" / "benchmark_questions.json"
         )
 
-        self.assertEqual(config.version, "2026-07-29-v2")
+        self.assertEqual(config.version, "1.0.0")
         self.assertEqual(len(config.scenarios), 9)
         self.assertEqual(config.question_count, 11)
         self.assertEqual(len(config.digest), 64)
@@ -479,7 +479,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
 
     def test_full_smoke_matches_questions_to_report_rows(self) -> None:
         config = benchmark_runner.load_benchmark_config(
-            PROJECT_ROOT / "benchmark_questions.json"
+            PROJECT_ROOT / "resources" / "benchmark_questions.json"
         )
         workflow = CapturingWorkflow()
 

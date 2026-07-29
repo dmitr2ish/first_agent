@@ -11,7 +11,7 @@ from agno.metrics import RunMetrics
 from agno.workflow.step import StepOutput
 from openpyxl import load_workbook
 
-from experiment_reporter import (
+from visa_research.reporting import (
     ExperimentConfig,
     ExperimentReporter,
     ReportExportWarning,
@@ -69,7 +69,7 @@ class ExperimentReporterTests(unittest.TestCase):
             max_source_pages=5,
             allowed_domains=["uscis.gov"],
             git_commit="abc1234",
-            notes="phase 6 test",
+            notes="reporting test",
         )
 
     @staticmethod
@@ -891,7 +891,7 @@ class ExperimentReporterTests(unittest.TestCase):
         self.assertEqual(rows, [("completed",)])
         self.assertIn("PermissionError", reporter.last_export_error or "")
 
-    def test_migrates_existing_phase_5_database(self) -> None:
+    def test_migrates_legacy_database(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
             connection.executescript(
                 """

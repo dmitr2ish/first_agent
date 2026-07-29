@@ -16,7 +16,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from project_config import REQUIRED_WORKFLOW_STEPS
+from visa_research.config import REQUIRED_WORKFLOW_STEPS
 
 
 WORKFLOW_TELEMETRY_KEY = "workflow_telemetry"
@@ -234,7 +234,7 @@ class ExperimentReporter:
     def _migrate_interactions_schema(
             connection: sqlite3.Connection,
     ) -> None:
-        """Add phase-6 columns to databases created by earlier versions."""
+        """Add current reporting columns to legacy databases."""
 
         existing_columns = {
             str(row["name"])

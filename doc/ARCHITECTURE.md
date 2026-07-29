@@ -1,159 +1,380 @@
 # Архитектура Visa Research Workflow
 
-> Этот файл сохраняет компактный архитектурный snapshot первичной реализации
-> phase 8. Каноническое актуальное описание, включая выявленные gaps и
-> release-hardening target, находится в
-> [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md).
+## 1. Карта репозитория
 
-Документ описывает архитектуру первичного snapshot этапа 8. Главный принцип:
-модель предлагает действия и формулирует текст, а обязательные условия
-retrieval, evidence, citations, допустимых источников и безопасности
-проверяются Python-кодом.
+```text
+.
+├── README.md
+├── visa_cli.py
+├── benchmark_runner.py
+├── doc/
+│   ├── README.md
+│   ├── OVERVIEW.md
+│   ├── DESIGN.md
+│   └── ARCHITECTURE.md
+├── resources/
+│   ├── benchmark_questions.json
+│   ├── requirements.txt
+│   └── requirements.lock
+├── scripts/
+│   ├── run_cli.sh
+│   ├── run_benchmark.sh
+│   └── run_tests.sh
+├── tests/
+└── visa_research/
+    ├── __init__.py
+    ├── cli.py
+    ├── config.py
+    ├── runtime.py
+    ├── workflow.py
+    ├── reporting.py
+    ├── sources/
+    │   ├── __init__.py
+    │   ├── collector.py
+    │   └── tools.py
+    └── benchmark/
+        ├── __init__.py
+        ├── runner.py
+        ├── evaluator.py
+        └── evidence.py
+```
 
-## Поток данных
+Корневые `visa_cli.py` и `benchmark_runner.py` не содержат бизнес-логики:
+они импортируют соответствующий `main` из пакета и передают аргументы командной
+строки.
 
-1. `build_search_query` превращает текущий вопрос и ограниченную историю в
-   самостоятельный англоязычный поисковый запрос.
-2. `collect_official_sources` выполняет Python-retrieval только по разрешённым
-   доменам государственных ведомств США, загружает страницы и присваивает им
-   локальные идентификаторы `S1`, `S2`, ...
-3. `analyze_official_sources` передаёт пакет источников Researcher через
-   Agno `dependencies`. Researcher видит содержимое только через tools.
-4. `check_research_citations` детерминированно извлекает ссылки вида `[S1]`,
-   сопоставляет их с пакетом и фиксирует недопустимые IDs.
-5. `validate_research` повторно читает evidence через tools, удаляет
-   неподтверждённые утверждения и проходит программный output-policy check.
-6. `create_final_answer` формирует ответ на языке пользователя. URL удаляются
-   из модельного текста и добавляются только из пакета источников. Отдельный
-   post-check блокирует практические советы по подделке документов,
-   доказательств или фактов. Если Manager пропустил legal disclaimer, Python
-   добавляет локализованную константу и записывает
-   `legal_disclaimer_added`.
-7. `ExperimentReporter` сначала записывает run, interaction, step telemetry и
-   tool calls в SQLite, затем полностью пересобирает XLSX из SQLite.
+## 2. Зависимости между компонентами
 
-У всех Agno Agents и Workflow явно задано `telemetry=False`, поэтому внешняя
-framework telemetry отключена. Локальная telemetry `ExperimentReporter`
-остаётся частью дизайна. Live retrieval всё равно отправляет generated query
-в DDGS и выполняет внешние HTTPS-запросы; он не является offline и не должен
-получать PII.
+```mermaid
+flowchart TD
+    Entry["visa_cli.py / benchmark_runner.py"] --> CLI["visa_research.cli"]
+    Entry --> Runner["visa_research.benchmark.runner"]
+    CLI --> Runtime["runtime"]
+    CLI --> Workflow["workflow"]
+    CLI --> Reporting["reporting"]
+    Runner --> Runtime
+    Runner --> Workflow
+    Runner --> Reporting
+    Runner --> Evaluator["benchmark.evaluator"]
+    Runner --> Evidence["benchmark.evidence"]
+    Workflow --> Config["config"]
+    Workflow --> Collector["sources.collector"]
+    Workflow --> Tools["sources.tools"]
+    Reporting --> Config
+    Evidence --> Workflow
+```
 
-После finalize/validation frozen evidence его финальный manifest SHA-256
-записывается reporter-ом в `component_versions` benchmark run, связывая
-SQLite provenance с точным cache artifact.
+Нижние слои не импортируют CLI или runner. `config` не зависит от остальных
+модулей проекта. Такая направленность предотвращает circular imports и
+позволяет тестировать слои отдельно.
 
-## Фактические schemas source tools
+## 3. Последовательность Workflow
 
-Скрытый параметр `run_context` предоставляет Agno и не выбирается моделью.
-Все tools возвращают JSON-строку.
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Q as Query Builder
+    participant C as Source Collector
+    participant R as Researcher
+    participant P as Python checks
+    participant V as Validator
+    participant M as Manager
+
+    U->>Q: исходный вопрос + ограниченная history
+    Q-->>C: самостоятельный search query
+    C->>C: search, URL policy, download, extraction, hashes
+    C-->>R: source package через dependencies
+    R->>R: list/search/read tools
+    R-->>P: research report + tool telemetry
+    P->>P: source IDs и evidence correlation
+    P-->>V: report + citation check + source package
+    V->>V: check/read/search tools
+    V-->>P: corrected grounded report
+    P->>P: validator output policy
+    P-->>M: validated report
+    M-->>P: localized answer
+    P->>P: citations, URL, safety, disclaimer, source appendix
+    P-->>U: финальный ответ
+```
+
+Agno `Workflow` содержит шесть именованных шагов:
+
+1. `build_search_query`;
+2. `collect_official_sources`;
+3. `analyze_official_sources`;
+4. `check_research_citations`;
+5. `validate_research`;
+6. `create_final_answer`.
+
+Все обязательные шаги используют `on_error="fail"`. Программные executors
+возвращают `StepOutput`; нарушение обязательного контракта устанавливает
+`success=False` и `stop=True`.
+
+## 4. Модули
+
+### `visa_research.config`
+
+Хранит:
+
+- пути по умолчанию;
+- параметры модели;
+- ограничения history и числа источников;
+- версии Workflow, prompts, collector и benchmark schema;
+- список обязательных шагов;
+- сбор runtime package versions;
+- Git revision и digest незакоммиченного состояния.
+
+`PROJECT_ROOT` вычисляется от расположения пакета, поэтому Git provenance не
+зависит от текущего рабочего каталога процесса.
+
+### `visa_research.runtime`
+
+Инкапсулирует REST-взаимодействие с Ollama:
+
+- `list_ollama_models`;
+- `preflight_ollama_model`;
+- `OllamaModelMetadata`;
+- `OllamaPreflightError`.
+
+Metadata содержит имя модели, digest, capabilities и server version и
+добавляется к provenance каждого run.
+
+### `visa_research.sources.collector`
+
+Отвечает за внешнюю сеть и преобразование документов в source package.
+
+Основные операции:
+
+- поиск кандидатов через DDGS;
+- фильтрация и deduplication URL;
+- безопасное следование redirect;
+- ограниченная загрузка;
+- извлечение HTML/PDF/plain text;
+- нормализация текста;
+- присвоение `S1`, `S2`, ...;
+- content и package SHA-256.
+
+Публичная функция `collect_official_sources_data` возвращает Python-словарь.
+Agno tool wrapper `collect_official_us_sources` возвращает JSON.
+
+### `visa_research.sources.tools`
+
+Содержит tools над уже загруженным пакетом:
 
 ```text
 list_official_sources() -> str
+read_official_source(source_id, start_char=0, max_chars=5000) -> str
+search_official_sources(query, max_results=6) -> str
+check_source_ids(source_ids) -> str
 ```
 
-Возвращает для каждого доступного источника `source_id`, `title`, `url`,
-`document_type` и `content_length`.
+`run_context` передаётся Agno автоматически. Source package находится в
+`run_context.dependencies` и не выбирается моделью.
 
-```text
-read_official_source(
-    source_id: str,
-    start_char: int = 0,
-    max_chars: int = 5000,
-) -> str
+`trace_tool_call` используется только при включённом debug. Он не влияет на
+вычисление телеметрии: фактические события берутся из response объекта Agno.
+
+### `visa_research.workflow`
+
+Содержит:
+
+- конфигурацию четырёх Agents;
+- executors шести Workflow steps;
+- dataclasses результатов tool/citation/output checks;
+- нормализацию tool telemetry;
+- контроллер одного повторного вызова Researcher и Validator;
+- проверку пакета frozen evidence;
+- validator и final output policies;
+- safety assessment и детерминированные fallback;
+- фабрику `init_visa_workflow`.
+
+Четыре роли:
+
+| Agent | Ответственность |
+|---|---|
+| Query Builder | Один самостоятельный официальный поисковый запрос |
+| Researcher | Анализ только текущего evidence через tools |
+| Validator | Повторная сверка ключевых утверждений и удаление неподтверждённого |
+| Manager | Понятный ответ на языке пользователя без новых фактов |
+
+### `visa_research.reporting`
+
+`ExperimentConfig` описывает конфигурацию запуска.
+`ExperimentReporter` управляет schema, миграцией совместимых старых DB,
+транзакционной записью и XLSX export.
+
+Reporting читает `workflow_telemetry` из `RunMetrics.extra_data`. Это отделяет
+прикладные метрики проекта от внутренних деталей представления Agno.
+
+### `visa_research.benchmark.runner`
+
+Загружает и валидирует JSON-конфигурацию, создаёт session IDs, выполняет ходы,
+вызывает semantic evaluator, передаёт результаты reporter-у и вычисляет exit
+code.
+
+Основные dataclasses:
+
+- `BenchmarkTurn`;
+- `BenchmarkScenario`;
+- `BenchmarkConfig`;
+- `BenchmarkExecutionSummary`.
+
+### `visa_research.benchmark.evaluator`
+
+Валидирует regex schema и проверяет финальное model-authored body. Программно
+добавленный список источников исключается из semantic evaluation, чтобы
+наличие слова в заголовке источника не давало ложный pass.
+
+### `visa_research.benchmark.evidence`
+
+`BenchmarkEvidenceCache` реализует lifecycle:
+
+- создать новый record manifest;
+- добавить пакет для каждого ожидаемого хода;
+- атомарно finalize;
+- открыть и проверить replay manifest;
+- вернуть точную копию пакета нужного хода.
+
+Неизвестный, отсутствующий, лишний или изменённый ход отклоняется.
+
+## 5. Контракты данных
+
+### Source package
+
+Упрощённая форма:
+
+```json
+{
+  "query": "site:uscis.gov O-1A eligibility",
+  "collected_at_utc": "ISO-8601 timestamp",
+  "allowed_domains": ["uscis.gov"],
+  "sources": [
+    {
+      "source_id": "S1",
+      "title": "Page title",
+      "url": "https://www.uscis.gov/...",
+      "document_type": "html",
+      "content": "Extracted text",
+      "content_sha256": "..."
+    }
+  ],
+  "evidence_package_digest": "..."
+}
 ```
 
-Читает фрагмент одного источника. `start_char` ограничивается снизу нулём,
-`max_chars` — диапазоном 500–8000. Результат содержит ID, заголовок, URL,
-смещение, длины и `content`; неизвестный ID возвращает JSON с `error`.
+Проверка override требует корректную форму, разрешённые URL, уникальные
+последовательные IDs, совпадающие content hashes и package digest.
 
-```text
-search_official_sources(
-    query: str,
-    max_results: int = 6,
-) -> str
+### Tool telemetry
+
+`ToolCallRecord` хранит имя, аргументы, номер попытки, success/error,
+duration, preview результата, признак evidence read и source IDs. Несколько
+запусков агента объединяются в `ToolCallSummary` без потери attempt number.
+
+### Citation telemetry
+
+`CitationCheckResult` содержит:
+
+- все употребления citations;
+- уникальные IDs;
+- доступные IDs;
+- invalid IDs;
+- отсутствие citations;
+- итоговый pass.
+
+Следующие проверки связывают citations с `evidence_source_ids`, прочитанными
+конкретным агентом.
+
+## 6. Хранилище
+
+Основные SQLite таблицы:
+
+| Таблица | Содержимое |
+|---|---|
+| `experiment_runs` | модель, конфигурация, версии, время и provenance |
+| `interactions` | вопрос, ответ, статусы, метрики шагов и benchmark |
+| `tool_calls` | нормализованные фактические вызовы инструментов |
+
+Связи используют foreign keys. Sequence number сохраняет порядок tool calls.
+Индексы ускоряют выборку по run и interaction.
+
+XLSX не используется как вход для расчётов. Все листы строятся заново из
+SQLite, поэтому их можно восстановить без расхождения источников истины.
+
+## 7. Поток benchmark
+
+```mermaid
+flowchart LR
+    JSON["resources/benchmark_questions.json"] --> Parse["Schema validation + digest"]
+    Parse --> Sessions["Session plan"]
+    Sessions --> Run["Workflow runs"]
+    Cache["Optional evidence cache"] --> Run
+    Run --> Eval["Technical + semantic + safety checks"]
+    Eval --> SQLite["SQLite transaction"]
+    SQLite --> XLSX["Atomic XLSX rebuild"]
+    Eval --> Exit["Process exit code"]
 ```
 
-Ищет слова внутри уже загруженных официальных документов. Число результатов
-ограничено диапазоном 1–10. Результат содержит запрос и ранжированные excerpts.
+В `record` режиме collector output каждого хода добавляется в cache после
+успешного извлечения. После всех ожидаемых ходов manifest финализируется, а
+его hash добавляется в component versions run. В `replay` режиме package
+передаётся Workflow через `additional_data.source_package_override`.
 
-```text
-check_source_ids(source_ids: list[str]) -> str
+## 8. Тестовая архитектура
+
+Тесты запускаются через стандартный `unittest` и не требуют сети или Ollama.
+Внешние HTTP, модели, Workflow responses и файловые артефакты заменяются
+mock-объектами или временными каталогами.
+
+Покрываются:
+
+- URL и redirect policy;
+- extraction limits и hashes;
+- source tools;
+- tool-call normalization и retries;
+- citation correlation;
+- Validator и final output policies;
+- safety rules;
+- frozen evidence integrity;
+- session isolation;
+- benchmark schema и exit codes;
+- SQLite migration и XLSX export;
+- Ollama preflight;
+- CLI lifecycle;
+- структура пакетов и отсутствие корневых внутренних модулей.
+
+Команда:
+
+```bash
+scripts/run_tests.sh
 ```
 
-Возвращает множества `valid`, `invalid` и `available`. Tool используется
-Validator, но сам по себе не считается чтением evidence.
+## 9. Расширение проекта
 
-## Как Agno и Python контролируют tool-calling loop
+### Новый источник
 
-Agno передаёт функции tools модели, исполняет выбранные вызовы и сохраняет
-фактические события в `response.tools`. Хук `trace_tool_call` печатает
-`[🔧 TOOL CALL]`, arguments, `[✅ TOOL RESULT]` или ошибку и длительность.
+Добавьте домен в `ALLOWED_DOMAINS` только после проверки назначения и
+redirect-поведения. Затем добавьте unit-тесты URL policy и загрузки.
 
-После каждого ответа Python нормализует `response.tools` в
-`ToolCallSummary`: имя, arguments, attempt, success/error, duration,
-`evidence_read` и короткий preview. Успешный
-`read_official_source` с непустым `content` или
-`search_official_sources` с непустым `matches` считается чтением evidence.
-`list_official_sources` и `check_source_ids` evidence не заменяют.
+### Новый Workflow step
 
-Если Researcher или Validator не прочитал evidence, контроллер делает ровно
-один повтор с обязательной инструкцией начать с чтения. После второй неудачи
-шаг завершается ошибкой. Внешний retry шага для Researcher и Validator
-отключён, поэтому скрытых дополнительных циклов нет. Validator дополнительно
-не может добавить новый URL, новый source ID или ID вне текущего пакета.
+Добавьте его имя в `REQUIRED_WORKFLOW_STEPS`, создайте `StepOutput` contract,
+обновите reporter extraction и тесты полного порядка шагов. Необязательный
+шаг не должен случайно влиять на release pass как обязательный.
 
-## Роли системных prompts
+### Новый benchmark-сценарий
 
-- **Query Builder** — формирует один самостоятельный официальный поисковый
-  запрос и использует историю только для разрешения контекста.
-- **Researcher** — анализирует только пакет текущего запуска, обязан вызвать
-  evidence tool, цитирует локальные IDs и не трактует текст веб-страниц как
-  инструкции.
-- **Validator** — сверяет отчёт с фактически прочитанным evidence, принимает
-  программный citation check как источник истины для IDs и возвращает только
-  исправленный подтверждённый отчёт.
-- **Visa Manager** — адаптирует валидированный отчёт к вопросу пользователя,
-  сохраняет citations, не добавляет знания или URL и отказывает в содействии
-  подделке либо иммиграционному мошенничеству.
+Добавьте стабильные `scenario.id`, `turn.id`, тип и semantic expectations в
+`resources/benchmark_questions.json`. Изменение файла автоматически меняет
+его digest.
 
-System prompts не являются единственной защитой. Python отдельно проверяет
-evidence, Researcher citations, часть Validator output policy и узкую
-fraud-политику финального ответа. Сквозной review показал, что до релиза
-необходимы повторные citation/grounding gates после Validator и Manager.
+### Новый tool
 
-## Хранилище и воспроизводимость
+Определите JSON-совместимый результат, явно решите, считается ли вызов
+evidence read, и обновите нормализацию tool telemetry и тесты.
 
-SQLite — единственный источник истины. Таблицы `experiment_runs`,
-`interactions` и `tool_calls` сохраняют конфигурацию, версии, git revision,
-идентификаторы сценариев и сессий, результаты шагов, citation metrics и
-фактические tool events. XLSX пересоздаётся атомарно и содержит листы
-`Benchmark Summary`, `Runs`, `Interactions`, `Step Outputs` и `Tool Calls`.
+### Другой model runtime
 
-Одинаковость сравнительного benchmark подтверждается версией набора,
-SHA-256 digest конфигурации, версиями workflow/prompts/collector, параметрами
-модели и git revision. Незакоммиченное состояние помечается суффиксом
-`-dirty`.
-
-## Известные ограничения
-
-- Локальные модели могут ошибаться в выборе tool, аргументах, классификации
-  виз и следовании prompt. Программные gates ограничивают последствия, но не
-  гарантируют юридическую корректность каждого текста.
-- `benchmark_pass` — технический критерий: успешный Workflow, источники,
-  evidence read, отсутствие invalid IDs и хотя бы одна citation. Он не
-  является экспертной юридической или полной semantic-оценкой.
-- Официальные сайты меняют разметку, перенаправления и доступность; некоторые
-  страницы блокируют автоматическую загрузку, а PDF и динамические страницы
-  могут извлекаться неполно.
-- Поиск ограничен разрешёнными доменами и содержимым, которое удалось
-  загрузить. Отсутствие evidence должно приводить к осторожному ответу или
-  технической неудаче, а не к дополнению из памяти модели.
-- Финальный safety-check намеренно узкий и детерминированный. Он блокирует
-  известные практические паттерны мошенничества, но не заменяет модерацию,
-  юриста или human review.
-- Session IDs первичного benchmark были изолированы внутри одного run, но не
-  глобально между разными reporting DB. Первичный phase-8 benchmark
-  переиспользовал часть старой Agno history и не является release evidence.
-- `citation_count` первичного отчёта вычислялся по Researcher report до
-  Validator и Manager; наличие citations в финальном body отдельно не
-  гарантировалось.
+Реализуйте отдельный adapter с тем же preflight-контрактом и metadata.
+Workflow не должен начинаться, пока runtime не подтвердил доступность модели
+и tool capability.

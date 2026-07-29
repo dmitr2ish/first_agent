@@ -2,7 +2,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from visa_workflow import (
+from visa_research.workflow import (
     build_citation_step_output,
     build_validator_prompt,
     check_report_citations,

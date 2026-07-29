@@ -7,12 +7,9 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DATABASE_FILE = "visa_assistant_data.db"
-# Deprecated compatibility constant. Runtime callers now generate an isolated
-# session ID for every interactive or benchmark run.
-SESSION_ID = "visa-cli-main"
 
 MAX_HISTORY_RUNS = 4
 MAX_SOURCE_PAGES = 5
@@ -24,9 +21,9 @@ MODEL_OPTIONS = {
 }
 
 WORKFLOW_VERSION = "1.1.0"
-PROMPT_VERSION = "visa-prompts-2026-07-29-v3"
+PROMPT_VERSION = "visa-prompts-v3"
 SOURCE_COLLECTOR_VERSION = "official-sources-v2"
-BENCHMARK_SCHEMA_VERSION = "visa-benchmark-release-v2"
+BENCHMARK_SCHEMA_VERSION = "visa-benchmark-v2"
 
 REQUIRED_WORKFLOW_STEPS = (
     "build_search_query",

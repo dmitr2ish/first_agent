@@ -2,7 +2,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from visa_workflow import (
+from visa_research.workflow import (
     CitationEvidenceMismatchError,
     ValidatorEvidenceRequiredError,
     ValidatorOutputPolicyError,

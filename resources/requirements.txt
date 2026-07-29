@@ -1,5 +1,4 @@
 # Direct runtime dependencies.
-# Versions match the environment used for the 2026-07-29 project audit.
 agno==2.7.4
 beautifulsoup4==4.15.0
 ddgs==9.14.4

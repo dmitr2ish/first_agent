@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from benchmark_evaluator import (
+from visa_research.benchmark.evaluator import (
     evaluate_semantic_expectations,
     strip_programmatic_source_appendix,
     validate_expectations_schema,

@@ -8,8 +8,8 @@ from unittest.mock import Mock, patch
 
 from agno.workflow.step import StepInput, StepOutput
 
-import visa_workflow
-from visa_workflow import (
+from visa_research import workflow as visa_workflow
+from visa_research.workflow import (
     CitationEvidenceMismatchError,
     FinalOutputPolicyError,
     LEGAL_DISCLAIMER_EN,

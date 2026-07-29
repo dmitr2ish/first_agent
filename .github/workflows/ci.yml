@@ -21,9 +21,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: resources/requirements.lock
 
       - name: Install locked dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.lock
+        run: python -m pip install --disable-pip-version-check -r resources/requirements.lock
 
       - name: Verify dependency consistency
         run: python -m pip check
@@ -31,24 +32,17 @@ jobs:
       - name: Compile active modules
         run: >-
           python -m compileall -q
-          benchmark_evaluator.py
-          benchmark_evidence.py
           benchmark_runner.py
-          experiment_reporter.py
-          official_sources.py
-          ollama_runtime.py
-          project_config.py
-          source_analysis_tools.py
           visa_cli.py
-          visa_workflow.py
+          visa_research
           tests
 
       - name: Verify imports without Ollama
         run: >-
           python -c
-          "import benchmark_evaluator, benchmark_evidence, benchmark_runner,
-          experiment_reporter, official_sources, ollama_runtime,
-          project_config, source_analysis_tools, visa_cli, visa_workflow"
+          "import visa_research.cli, visa_research.workflow,
+          visa_research.sources.collector, visa_research.sources.tools,
+          visa_research.reporting, visa_research.benchmark.runner"
 
       - name: Run offline unit tests
         run: python -m unittest discover -s tests -v

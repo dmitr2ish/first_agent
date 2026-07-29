@@ -10,7 +10,7 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
 class OllamaPreflightError(RuntimeError):
-    """Raised when Ollama or the selected model is not release-ready."""
+    """Raised when Ollama or the selected model cannot run the workflow."""
 
 
 @dataclass(frozen=True)

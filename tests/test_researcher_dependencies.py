@@ -1,6 +1,6 @@
 import unittest
 
-from visa_workflow import run_researcher_with_sources
+from visa_research.workflow import run_researcher_with_sources
 
 
 class RecordingResearcher:

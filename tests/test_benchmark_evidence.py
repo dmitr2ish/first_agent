@@ -10,14 +10,14 @@ from unittest.mock import Mock
 
 from agno.workflow.step import StepOutput
 
-import benchmark_runner
-from benchmark_evidence import (
+from visa_research.benchmark import runner as benchmark_runner
+from visa_research.benchmark.evidence import (
     BenchmarkEvidenceCache,
     EvidenceCacheError,
     EvidenceTurn,
     extract_source_package,
 )
-from visa_workflow import validate_source_package_override
+from visa_research.workflow import validate_source_package_override
 
 
 def source_package(label: str = "recorded") -> dict:

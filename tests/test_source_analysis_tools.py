@@ -5,7 +5,7 @@ from contextlib import redirect_stdout
 
 from agno.run import RunContext
 
-from source_analysis_tools import (
+from visa_research.sources.tools import (
     check_source_ids,
     list_official_sources,
     read_official_source,

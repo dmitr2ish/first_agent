@@ -5,8 +5,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from unittest.mock import Mock, patch
 
-import ollama_runtime
-import visa_cli
+from visa_research import cli as visa_cli
+from visa_research import runtime as ollama_runtime
 
 
 class FakeHttpResponse:

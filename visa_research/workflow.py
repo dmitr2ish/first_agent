@@ -15,20 +15,20 @@ from agno.models.ollama import Ollama
 from agno.workflow.step import Step, StepInput, StepOutput
 from agno.workflow.workflow import Workflow
 
-from official_sources import (
+from visa_research.sources.collector import (
     MAX_QUERY_CHARS,
     MAX_TEXT_CHARS_PER_SOURCE,
     _is_allowed_url,
     collect_official_sources_data,
 )
-from project_config import (
+from visa_research.config import (
     DATABASE_FILE,
     MAX_HISTORY_RUNS,
     MAX_SOURCE_PAGES,
     MODEL_OPTIONS,
     REQUIRED_WORKFLOW_STEPS,
 )
-from source_analysis_tools import (
+from visa_research.sources.tools import (
     check_source_ids,
     list_official_sources,
     read_official_source,

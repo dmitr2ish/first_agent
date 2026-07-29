@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from agno.workflow.step import Step, StepInput, StepOutput
 from agno.workflow.workflow import Workflow
 
-from visa_workflow import (
+from visa_research.workflow import (
     EvidenceReadRequiredError,
     ResearcherReportEmptyError,
     build_researcher_step_output,

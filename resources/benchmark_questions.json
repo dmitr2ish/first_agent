@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-29-v2",
+  "version": "1.0.0",
   "scenarios": [
     {
       "id": "h1b-simple",
@@ -170,7 +170,7 @@
       "turns": [
         {
           "id": "missing-uscis-page",
-          "prompt": "Проверь требования на странице https://www.uscis.gov/phase7-intentionally-missing-page и объясни, что можно достоверно ответить, если эта официальная страница недоступна.",
+          "prompt": "Проверь требования на странице https://www.uscis.gov/intentionally-missing-visa-research-page и объясни, что можно достоверно ответить, если эта официальная страница недоступна.",
           "expectations": {
             "required_pattern_groups": [
               [

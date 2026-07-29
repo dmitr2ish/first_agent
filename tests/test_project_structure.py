@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,30 +13,30 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import benchmark_runner
-from ollama_runtime import OllamaModelMetadata
-import project_config
-import visa_cli
-import visa_workflow
+from visa_research import cli as visa_cli
+from visa_research import config as project_config
+from visa_research import workflow as visa_workflow
+from visa_research.benchmark import runner as benchmark_runner
+from visa_research.runtime import OllamaModelMetadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProjectStructureTests(unittest.TestCase):
-    def test_new_modules_import_without_circular_dependencies(self) -> None:
+    def test_package_modules_import_without_circular_dependencies(self) -> None:
         import_orders = [
             (
-                "project_config",
-                "visa_workflow",
-                "visa_cli",
-                "benchmark_runner",
+                "visa_research.config",
+                "visa_research.workflow",
+                "visa_research.cli",
+                "visa_research.benchmark.runner",
             ),
             (
-                "benchmark_runner",
-                "visa_cli",
-                "visa_workflow",
-                "project_config",
+                "visa_research.benchmark.runner",
+                "visa_research.cli",
+                "visa_research.workflow",
+                "visa_research.config",
             ),
         ]
 
@@ -59,7 +60,68 @@ class ProjectStructureTests(unittest.TestCase):
                 msg=completed.stderr,
             )
 
-    def test_versions_are_centralized_in_project_config(self) -> None:
+    def test_root_contains_only_entry_points(self) -> None:
+        self.assertEqual(
+            {
+                path.name
+                for path in PROJECT_ROOT.glob("*.py")
+            },
+            {"benchmark_runner.py", "visa_cli.py"},
+        )
+
+    def test_documentation_resources_and_scripts_match_layout(self) -> None:
+        required_paths = (
+            "doc/README.md",
+            "doc/OVERVIEW.md",
+            "doc/DESIGN.md",
+            "doc/ARCHITECTURE.md",
+            "resources/benchmark_questions.json",
+            "resources/requirements.txt",
+            "resources/requirements.lock",
+            "scripts/run_cli.sh",
+            "scripts/run_benchmark.sh",
+            "scripts/run_tests.sh",
+        )
+
+        for relative_path in required_paths:
+            self.assertTrue(
+                (PROJECT_ROOT / relative_path).is_file(),
+                msg=f"Missing documented project file: {relative_path}",
+            )
+
+        self.assertEqual(
+            benchmark_runner.DEFAULT_QUESTIONS_FILE,
+            PROJECT_ROOT / "resources" / "benchmark_questions.json",
+        )
+
+    def test_local_markdown_links_resolve(self) -> None:
+        markdown_files = [
+            PROJECT_ROOT / "README.md",
+            *(PROJECT_ROOT / "doc").glob("*.md"),
+        ]
+
+        for markdown_file in markdown_files:
+            text = markdown_file.read_text(encoding="utf-8")
+
+            for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
+                if (
+                    target.startswith(("http://", "https://", "#"))
+                    or "://" in target
+                ):
+                    continue
+
+                resolved = (
+                    markdown_file.parent / target.split("#", 1)[0]
+                ).resolve()
+                self.assertTrue(
+                    resolved.exists(),
+                    msg=(
+                        f"Broken local link in {markdown_file}: "
+                        f"{target}"
+                    ),
+                )
+
+    def test_versions_are_centralized_in_config(self) -> None:
         self.assertEqual(project_config.WORKFLOW_VERSION, "1.1.0")
         self.assertTrue(project_config.PROMPT_VERSION)
         self.assertTrue(project_config.SOURCE_COLLECTOR_VERSION)

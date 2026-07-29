@@ -4,7 +4,7 @@ import hashlib
 import unittest
 from unittest.mock import Mock, patch
 
-import official_sources
+from visa_research.sources import collector as official_sources
 
 
 class FakeResponse:

@@ -32,6 +32,3 @@ dist/
 *.xlsx
 *.log
 reports/
-
-# Local agent instructions
-doc/AGENTS.md

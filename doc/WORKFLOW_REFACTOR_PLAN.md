@@ -339,8 +339,8 @@ runner или report configuration и отвечает за сборку Workflo
 
 ## Этап 6. Расширение benchmark-отчётности
 
-- [ ] Сохранить SQLite как единственный источник истины.
-- [ ] Добавить к interaction следующие данные:
+- [x] Сохранить SQLite как единственный источник истины.
+- [x] Добавить к interaction следующие данные:
   - `tool_call_count`;
   - `tool_names`;
   - `tool_error_count`;
@@ -352,21 +352,21 @@ runner или report configuration и отвечает за сборку Workflo
   - `researcher_success`;
   - `validator_success`;
   - `final_status`.
-- [ ] Сохранять отдельные tool-call события.
-- [ ] Добавить лист `Tool Calls` в XLSX.
-- [ ] Сохранить листы `Runs`, `Interactions` и `Step Outputs`.
-- [ ] Обеспечить обратную совместимость или явную миграцию существующей SQLite-схемы.
-- [ ] Не хранить в превью tool result чрезмерно большие тексты источников.
+- [x] Сохранять отдельные tool-call события.
+- [x] Добавить лист `Tool Calls` в XLSX.
+- [x] Сохранить листы `Runs`, `Interactions` и `Step Outputs`.
+- [x] Обеспечить обратную совместимость или явную миграцию существующей SQLite-схемы.
+- [x] Не хранить в превью tool result чрезмерно большие тексты источников.
 
 ### Обязательные тесты
 
-- [ ] Unit-тест записи interaction с tool metrics.
-- [ ] Unit-тест записи нескольких tool calls одного агента.
-- [ ] Unit-тест записи ошибки инструмента.
-- [ ] Unit-тест повторного построения XLSX из SQLite.
-- [ ] Проверка заголовков и числа строк каждого XLSX-листа.
-- [ ] Проверка миграции на копии существующей базы или новой тестовой базе.
-- [ ] Визуальная проверка итоговой таблицы.
+- [x] Unit-тест записи interaction с tool metrics.
+- [x] Unit-тест записи нескольких tool calls одного агента.
+- [x] Unit-тест записи ошибки инструмента.
+- [x] Unit-тест повторного построения XLSX из SQLite.
+- [x] Проверка заголовков и числа строк каждого XLSX-листа.
+- [x] Проверка миграции на копии существующей базы или новой тестовой базе.
+- [x] Визуальная проверка итоговой таблицы.
 
 ### Критерий готовности
 
@@ -374,7 +374,36 @@ runner или report configuration и отвечает за сборку Workflo
 
 ### Результат проверки
 
-Пока не выполнено.
+27 июля 2026 года: SQLite-схема `interactions` расширена агрегированными
+tool, citation, source и success-метриками. Отдельные вызовы Researcher и
+Validator сохраняются в таблице `tool_calls` с агентом, шагом, попыткой,
+аргументами, статусом, duration, evidence-флагом и result preview длиной не
+более 240 символов.
+
+Telemetry передаётся из Workflow через штатный
+`StepOutput.metrics.additional_metrics`, поэтому текстовый контракт шагов не
+изменился. `ExperimentReporter` извлекает telemetry, записывает interaction и
+tool calls одной SQLite-транзакцией, а затем полностью пересобирает XLSX
+только из SQLite. Сохранены листы `Runs`, `Interactions` и `Step Outputs`,
+добавлен лист `Tool Calls`.
+
+Миграция добавляет отсутствующие колонки через `ALTER TABLE` и сохраняет
+существующие interactions. Она проверена автоматически на phase-5 схеме и
+вручную на SQLite backup текущей базы: все три существующих interaction
+сохранены, XLSX успешно восстановлен с четырьмя листами.
+
+Все 53 теста проходят. Визуальная проверка всех листов выполнена после
+рендера XLSX; заголовки, переносы, freeze panes, фильтры и размеры колонок
+читаемы, формульных ошибок не найдено.
+
+Полный production-запуск с `qwen2.5:14b` завершил шесть шагов Workflow и
+сохранил в временные SQLite/XLSX: пять tool calls Researcher/Validator,
+`citation_count=5`, `used_source_ids=["S1"]`, пять sources, успешные
+Researcher и Validator и `final_status=COMPLETED`. Критерий готовности этапа
+выполнен.
+
+Подробности сохранены в
+[`doc/phase_6_report.md`](phase_6_report.md).
 
 ## Этап 7. Benchmark-набор и изоляция сценариев
 

@@ -8,6 +8,7 @@ from typing import Any
 
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.metrics import RunMetrics
 from agno.models.ollama import Ollama
 from agno.workflow.step import Step, StepInput, StepOutput
 from agno.workflow.workflow import Workflow
@@ -100,10 +101,12 @@ class ToolCallRecord:
 
     name: str
     arguments: dict[str, Any]
+    attempt: int
     success: bool
     error: bool
     duration_seconds: float | None
     evidence_read: bool
+    result_preview: str
 
 
 @dataclass(frozen=True)
@@ -230,19 +233,51 @@ def citation_check_to_json(result: CitationCheckResult) -> str:
     )
 
 
+def build_step_telemetry_metrics(
+        telemetry: dict[str, Any],
+) -> RunMetrics:
+    """Store workflow telemetry without changing the step content contract."""
+
+    return RunMetrics(
+        additional_metrics={
+            "workflow_telemetry": telemetry,
+        }
+    )
+
+
+def tool_summary_to_telemetry(
+        *,
+        agent_name: str,
+        summary: ToolCallSummary,
+        attempt_count: int,
+) -> dict[str, Any]:
+    """Serialize one agent's controlled tool execution for reporting."""
+
+    return {
+        "agent_name": agent_name,
+        "attempt_count": attempt_count,
+        "tool_summary": asdict(summary),
+    }
+
+
 def build_citation_step_output(
         report: str,
         source_package: dict[str, Any],
 ) -> StepOutput:
     """Create the persisted Workflow output for citation metrics."""
 
+    citation_check = check_report_citations(
+        report,
+        source_package,
+    )
+
     return StepOutput(
         step_name="check_research_citations",
-        content=citation_check_to_json(
-            check_report_citations(
-                report,
-                source_package,
-            )
+        content=citation_check_to_json(citation_check),
+        metrics=build_step_telemetry_metrics(
+            {
+                "citation_check": asdict(citation_check),
+            }
         ),
         success=True,
     )
@@ -348,7 +383,10 @@ def run_validator_with_tool_control(
         research_report,
         citation_check_json,
     )
-    first_summary = summarize_tool_calls(first_response)
+    first_summary = summarize_tool_calls(
+        first_response,
+        attempt=1,
+    )
 
     if first_summary.evidence_read_performed:
         return ValidatorRunResult(
@@ -372,7 +410,10 @@ report until source content has been read.
         citation_check_json,
         retry_instruction,
     )
-    second_summary = summarize_tool_calls(second_response)
+    second_summary = summarize_tool_calls(
+        second_response,
+        attempt=2,
+    )
 
     return ValidatorRunResult(
         response=second_response,
@@ -492,6 +533,13 @@ def build_validator_step_output(
     return StepOutput(
         step_name="validate_research",
         content=validated_report,
+        metrics=build_step_telemetry_metrics(
+            tool_summary_to_telemetry(
+                agent_name="validator",
+                summary=result.tool_summary,
+                attempt_count=result.attempt_count,
+            )
+        ),
         success=True,
     )
 
@@ -535,7 +583,33 @@ def _tool_read_evidence(name: str, success: bool, result: Any) -> bool:
     return isinstance(content, str) and bool(content.strip())
 
 
-def summarize_tool_calls(response: Any) -> ToolCallSummary:
+def _tool_result_preview(
+        result: Any,
+        *,
+        max_chars: int = 240,
+) -> str:
+    preview = (
+        result
+        if isinstance(result, str)
+        else json.dumps(
+            result,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+    preview = preview.strip()
+
+    if len(preview) <= max_chars:
+        return preview
+
+    return preview[:max_chars - 1].rstrip() + "…"
+
+
+def summarize_tool_calls(
+        response: Any,
+        *,
+        attempt: int = 1,
+) -> ToolCallSummary:
     """Extract deterministic tool-call metrics from an Agno response."""
 
     tools = getattr(response, "tools", None) or []
@@ -566,6 +640,7 @@ def summarize_tool_calls(response: Any) -> ToolCallSummary:
             ToolCallRecord(
                 name=name,
                 arguments=arguments,
+                attempt=attempt,
                 success=success,
                 error=error,
                 duration_seconds=duration,
@@ -574,6 +649,7 @@ def summarize_tool_calls(response: Any) -> ToolCallSummary:
                     success,
                     result,
                 ),
+                result_preview=_tool_result_preview(result),
             )
         )
 
@@ -628,7 +704,10 @@ def run_researcher_with_evidence_control(
         prompt,
         source_package,
     )
-    first_summary = summarize_tool_calls(first_response)
+    first_summary = summarize_tool_calls(
+        first_response,
+        attempt=1,
+    )
 
     if first_summary.evidence_read_performed:
         return ResearcherRunResult(
@@ -652,7 +731,10 @@ sufficient.
         retry_prompt,
         source_package,
     )
-    second_summary = summarize_tool_calls(second_response)
+    second_summary = summarize_tool_calls(
+        second_response,
+        attempt=2,
+    )
 
     return ResearcherRunResult(
         response=second_response,
@@ -685,6 +767,13 @@ def build_researcher_step_output(
     return StepOutput(
         step_name="analyze_official_sources",
         content=report,
+        metrics=build_step_telemetry_metrics(
+            tool_summary_to_telemetry(
+                agent_name="researcher",
+                summary=result.tool_summary,
+                attempt_count=result.attempt_count,
+            )
+        ),
         success=True,
     )
 

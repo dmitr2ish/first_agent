@@ -248,6 +248,14 @@ class ResearcherEvidenceControlTests(unittest.TestCase):
 
         self.assertTrue(step_output.success)
         self.assertEqual(step_output.content, "verified report [S1]")
+        telemetry = step_output.metrics.additional_metrics[
+            "workflow_telemetry"
+        ]
+        self.assertEqual(telemetry["agent_name"], "researcher")
+        self.assertEqual(
+            telemetry["tool_summary"]["tool_names"],
+            ("read_official_source",),
+        )
 
     def test_empty_report_after_evidence_is_failure(self) -> None:
         researcher = SequenceResearcher(

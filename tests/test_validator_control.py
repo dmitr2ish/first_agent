@@ -197,6 +197,14 @@ class ValidatorControlTests(unittest.TestCase):
         self.assertTrue(step_output.success)
         self.assertIn("nonimmigrant", step_output.content)
         self.assertNotIn("is an immigrant", step_output.content)
+        telemetry = step_output.metrics.additional_metrics[
+            "workflow_telemetry"
+        ]
+        self.assertEqual(telemetry["agent_name"], "validator")
+        self.assertEqual(
+            telemetry["tool_summary"]["tool_names"],
+            ("read_official_source",),
+        )
 
     def test_unsupported_claim_can_be_removed(self) -> None:
         original = (

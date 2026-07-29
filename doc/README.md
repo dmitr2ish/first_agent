@@ -34,5 +34,11 @@
   benchmark runner и общей конфигурации, smoke-тесты entry points и проверка
   отсутствия циклических импортов.
 
+## Этап 6. Расширение benchmark-отчётности
+
+- [Отчёт о выполнении этапа 6](phase_6_report.md) — агрегированные interaction
+  metrics, отдельные tool-call события, миграция SQLite и лист `Tool Calls` в
+  восстанавливаемом XLSX.
+
 Общий план дальнейшего рефакторинга находится в
 [`WORKFLOW_REFACTOR_PLAN.md`](WORKFLOW_REFACTOR_PLAN.md).

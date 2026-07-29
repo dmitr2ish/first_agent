@@ -113,6 +113,13 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(payload["citation_count"], 2)
         self.assertEqual(payload["invalid_source_ids"], ["S99"])
+        telemetry = step_output.metrics.additional_metrics[
+            "workflow_telemetry"
+        ]
+        self.assertEqual(
+            telemetry["citation_check"]["invalid_source_ids"],
+            ("S99",),
+        )
 
     def test_validator_prompt_contains_programmatic_result(self) -> None:
         package_with_secret_content = {
